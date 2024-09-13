@@ -288,7 +288,6 @@ class Decoder(nn.Module):
 #         for i, layer in enumerate(self.up):
 #             print(f"{i} : {x.std():4f} {x.min():4f} {x.max():4f}")
 #             inf = x.detach().clone()
-#             x = layer(x)
 
 #             if torch.isnan(x).any():
 #                 print("TOTAL LAYERS :", len(self.up))
@@ -299,6 +298,8 @@ class Decoder(nn.Module):
                 
 #                 # Log the NaN issue for debugging
 #                 raise  # stop forward pass when NaN is detected
+            
+#             x = layer(x)
                 
 #         return x
     
@@ -373,26 +374,29 @@ class Codebook(nn.Module):
     
 
 class Discriminator(nn.Module):
-
-    def __init__(self, in_channels: int, channels: list[int], num_groups: int):
+    def __init__(self, in_channels: int, channels: list[int]):
         super().__init__()
-        layers = [
-            nn.Conv2d(in_channels, channels[0], kernel_size=3),
-            nn.LeakyReLU(0.1)
-        ]
-
-        for c1, c2 in zip(channels, channels[1:]):
-            layers.append(nn.Conv2d(c1, c2, kernel_size=4, stride=2, padding=1))
-            layers.append(nn.GroupNorm(num_groups, c2))
-            layers.append(nn.LeakyReLU(0.1))
-
-        layers.append(nn.Conv2d(channels[-1], channels[-1], kernel_size=1))
-        layers.append(nn.LeakyReLU(0.1))
-        layers.append(nn.Conv2d(channels[-1], 1, kernel_size=4))
-
-        self.layers = nn.Sequential(*layers)
-
-    def forward(self, x):
-        x = self.layers(x)
-        return x
+        self.in_channels = in_channels
+        layers_dim = [self.in_channels] + channels + [1]
+        self.layers = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(
+                        layers_dim[i], layers_dim[i + 1],   
+                        kernel_size=4,
+                        stride=2,
+                        padding=1,
+                        bias=False if i != 0 else True
+                    ),
+                    nn.BatchNorm2d(layers_dim[i + 1]) if i != len(layers_dim) - 2 and i != 0 else nn.Identity(),
+                    nn.LeakyReLU(0.2) if i != len(layers_dim) - 2 else nn.Identity()
+                )
+                for i in range(len(layers_dim) - 1)
+            ]
+        )
     
+    def forward(self, x):
+        out = x
+        for layer in self.layers:
+            out = layer(out)
+        return out

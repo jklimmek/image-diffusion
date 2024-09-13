@@ -3,7 +3,6 @@ import numpy  as np
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import Compose, Normalize
-from models.vqgan import VQGAN
 from trainers.vqgan_trainer import VQGANTrainer
 from modules.util import *
 
@@ -76,27 +75,12 @@ def main():
     train_ds = VQDataset(args["train_set"], transforms=transforms)
     dev_ds = VQDataset(args["dev_set"], transforms=transforms)
     logger = BasicLogger(args["logs_dir"], args["run_name"], args["no_mlflow"])
-    vqgan = VQGAN(
-        args["in_channels"],
-        args["channels"],
-        args["enc_num_res_blocks"],
-        args["dec_num_res_blocks"],
-        args["attn_resolutions"],
-        args["codebook_size"],
-        args["codebook_beta"],
-        args["codebook_gamma"],
-        args["disc_channels"],
-        args["z_dim"],
-        args["init_resolution"],
-        args["num_groups"]
-    )
-
+    
     trainer = VQGANTrainer(
-        vqgan,
+        args,
         train_ds,
         dev_ds,
-        logger,
-        args
+        logger
     )
 
     trainer.train()

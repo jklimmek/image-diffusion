@@ -1,5 +1,5 @@
 # Modules :
-# - TrainerVQGAN
+# - VQGANTrainer
 
 import os
 import contextlib
@@ -10,8 +10,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity as LPIPS
 from itertools import chain
 from modules.util import *
+from modules.vqgan_components import *
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Arguments other than a weight enum.*")
@@ -22,29 +24,70 @@ class VQGANTrainer:
 
     def __init__(
             self,
-            vqgan,
+            args,
             train_set,
             dev_set,
-            logger,
-            args,
+            logger
         ):
         
         for k, v in args.items():
             setattr(self, k, v)
 
-        self.vqgan = vqgan
-        self.vqgan.to(self.device)
-        self.dev_set = dev_set
-        self.train_set = train_set
+        # Set up components.
+        self.encoder = Encoder(
+            self.in_channels, 
+            self.channels, 
+            self.z_dim, 
+            self.enc_num_res_blocks, 
+            self.attn_resolutions, 
+            self.init_resolution, 
+            self.num_groups
+        )
+
+        self.decoder = Decoder(
+            self.in_channels,
+            self.channels[::-1],
+            self.z_dim,
+            self.dec_num_res_blocks,
+            self.attn_resolutions,
+            self.init_resolution // 2 ** len(self.channels),
+            self.num_groups
+        )
+
+        self.codebook = Codebook(
+            self.codebook_size,
+            self.z_dim,
+            self.codebook_beta,
+            self.codebook_gamma
+        )
+
+        self.discriminator = Discriminator(
+            self.in_channels,
+            self.disc_channels,
+        )
+
+        self.encoder.to(self.device)
+        self.decoder.to(self.device)
+        self.codebook.to(self.device)
+        self.discriminator.to(self.device)
+
         self.logger = logger
 
+        # Set up losses.
+        self.recon_loss = nn.MSELoss().to(self.device)
+        self.disc_loss = nn.BCEWithLogitsLoss().to(self.device)
+        self.percept_loss = LPIPS(net_type="vgg").eval().to(self.device)
+        for param in self.percept_loss.parameters():
+            if param.requires_grad:
+                param.requires_grad_(False)
+
         # Set up optimizers.
-        disc_params = list(self.vqgan.discriminator.parameters())
+        disc_params = list(self.discriminator.parameters())
         vqvae_params = list(
             chain(
-                self.vqgan.encoder.parameters(),
-                self.vqgan.decoder.parameters(),
-                self.vqgan.codebook.parameters()
+                self.encoder.parameters(),
+                self.decoder.parameters(),
+                self.codebook.parameters()
             )
         )
 
@@ -52,7 +95,11 @@ class VQGANTrainer:
         self.disc_optim = optim.Adam(disc_params, lr=self.learning_rate)
 
         # Log number of params.
-        enc, dec, codebook, disc = self.vqgan.num_trainable_params
+        num_params = lambda model: sum(p.numel() for p in model.parameters() if p.requires_grad)
+        enc = num_params(self.encoder)
+        dec = num_params(self.decoder)
+        codebook = num_params(self.codebook)
+        disc = num_params(self.discriminator)
         self.logger.log_console(f"Encoder has {enc:,} params.")
         self.logger.log_console(f"Decoder has {dec:,} params.")
         self.logger.log_console(f"Codebook has {codebook:,} params.")
@@ -89,17 +136,23 @@ class VQGANTrainer:
         if self.checkpoint is not None:
             self.curr_epoch = load_checkpoint(
                 self.checkpoint,
-                self.vqgan.encoder,
-                self.vqgan.decoder,
-                self.vqgan.codebook,
-                self.vqgan.discriminator,
-                self.vqvae_optim,
-                self.disc_optim
+                encoder=self.encoder,
+                decoder=self.decoder,
+                codebook=self.codebook,
+                discriminator=self.discriminator,
+                vqvae_optim=self.vqvae_optim,
+                disc_optim=self.disc_optim
             ) + 1
             self.logger.log_console(f"Loading model checkpoint from {self.checkpoint}")
         else:
             self.curr_epoch = 0
             self.logger.log_console("No checkpoint provided. Training from scratch.")
+
+    def to_train(self, mode):
+        self.encoder.train(mode)
+        self.decoder.train(mode)
+        self.codebook.train(mode)
+        self.discriminator.train(mode)
 
     def train(self):
 
@@ -107,87 +160,147 @@ class VQGANTrainer:
         last_epoch = min(self.epochs, self.total_epochs)
         for epoch in range(self.curr_epoch, last_epoch):
 
-            # Training loop.
-            self.vqgan.train()
-            for step, x in tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc=f"Epoch {epoch}", ncols=100):
+            # Training part.
+            self.to_train(True)
 
-                # Logging step.
+            for step, x in tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc=f"Epoch {epoch}", ncols=100):
+                
                 adjusted_step = epoch * len(self.train_loader) + step
+
+                # Plot examples to MLflow.
+                if (adjusted_step + 1) % self.log_imgs_freq == 0:
+                    self.to_train(False)
+                    images = np.load(self.plot_set)
+                    images = torch.from_numpy(images).to(self.device)
+                    images = images.permute(0, 3, 1, 2).float() / 255.0
+                    images = (images - 0.5) / 0.5
+                    with torch.no_grad():
+                        z = self.encoder(images)
+                        z_q, _, _ = self.codebook(z)
+                        reconstructed = self.decoder(z_q).tanh()
+                    figure = plot_images(images, reconstructed)
+                    self.logger.log_figure(f"plots/{epoch}_reconstructed.png", figure)
+                    self.to_train(True)
 
                 t1 = time.time()
                 x = x.to(self.device)
-
+                
                 # (1) Update Generator (VAE).
+                self.vqvae_optim.zero_grad()
                 with self.ctx:
-                    (
-                        vqvae_loss, recon_loss, percept_loss, 
-                        quant_loss, gen_loss, adaptive_weight, perplexity
-                    ) = self.vqgan(x, return_ae_loss=True, disc_weight=1.0 if adjusted_step > self.disc_start else 0.0)
-                self.vqvae_scaler.scale(vqvae_loss).backward()
+
+                    # Forward pass.
+                    z = self.encoder(x)
+                    z_q, quant_loss, perplexity = self.codebook(z)
+                    x_hat = self.decoder(z_q).tanh()
+
+                    # Calculate losses.
+                    percept_loss = self.percept_loss(x, x_hat)
+                    recon_loss = self.recon_loss(x, x_hat)
+
+                    vae_loss = (
+                        percept_loss * self.percept_weight +
+                        recon_loss * self.recon_weight +
+                        quant_loss * self.quant_weight
+                    )
+                    if self.disc_start < adjusted_step: 
+                        disc_patches = self.discriminator(x_hat)
+                        g_loss = self.disc_loss(disc_patches, torch.ones_like(disc_patches, device=self.device))
+                        vae_loss += self.disc_weight * g_loss
+                
+                # Backward pass.
+                self.vqvae_scaler.scale(vae_loss).backward()
 
                 # Clip gradients for VAE.
                 if self.clip_grad is not None:
                     self.vqvae_scaler.unscale_(self.vqvae_optim)
                     vqvae_grad = nn.utils.clip_grad_norm_(
-                        list(self.vqgan.encoder.parameters()) +
-                        list(self.vqgan.decoder.parameters()) +
-                        list(self.vqgan.codebook.parameters()), 
+                        list(
+                            chain(
+                                self.encoder.parameters(),
+                                self.decoder.parameters(),
+                                self.codebook.parameters()
+                            )
+                        ), 
                         self.clip_grad
                     ).item()
-                else: vqvae_grad = None
+                else: vqvae_grad = -1.0
 
-                self.logger.log_metric("train/recon_loss", recon_loss.item(), step=adjusted_step)
-                self.logger.log_metric("train/percept_loss", percept_loss.item(), step=adjusted_step)
-                self.logger.log_metric("train/quant_loss", quant_loss.item(), step=adjusted_step)
-                self.logger.log_metric("train/gen_loss", gen_loss.item(), step=adjusted_step)
-                self.logger.log_metric("train/vqvae_grad", vqvae_grad, step=adjusted_step)
-                self.logger.log_metric("train/adaptive_weight", adaptive_weight.item(), step=adjusted_step)
-                self.logger.log_metric("train/perplexity", perplexity, step=adjusted_step)
-
+                # Update params.
                 self.vqvae_scaler.step(self.vqvae_optim)
                 self.vqvae_scaler.update()
-                self.vqvae_optim.zero_grad()
+                
+                # Log VAE metrics.
+                self.logger.log_metric("vae/recon_loss", recon_loss.item(), step=adjusted_step)
+                self.logger.log_metric("vae/percept_loss", percept_loss.item(), step=adjusted_step)
+                self.logger.log_metric("vae/quant_loss", quant_loss.item(), step=adjusted_step)
+                self.logger.log_metric("vae/vqvae_grad", vqvae_grad, step=adjusted_step)
+                self.logger.log_metric("vae/perplexity", perplexity, step=adjusted_step)
+                if self.disc_start < adjusted_step: 
+                    self.logger.log_metric("gan/g_loss", g_loss.item(), step=adjusted_step - self.disc_start)
 
                 # (2) Update Discriminator.
-                if adjusted_step > self.disc_start:
+                self.disc_optim.zero_grad()
+                if self.disc_start < adjusted_step: 
                     with self.ctx:
-                        disc_loss, disc_real, disc_fake = self.vqgan(x, return_disc_loss=True)
-                    self.disc_scaler.scale(disc_loss).backward()
+                        disc_real = self.discriminator(x)
+                        disc_fake = self.discriminator(x_hat.detach())
+                        real_loss = self.disc_loss(disc_real, torch.ones_like(disc_real, device=self.device))
+                        fake_loss = self.disc_loss(disc_fake, torch.zeros_like(disc_fake, device=self.device))
+                        d_loss = self.disc_weight * (real_loss + fake_loss) / 2
+
+                    # Calculate accuracies of Discriminator.
+                    real_pred_class = (disc_real.sigmoid() >= 0.5).float()
+                    fake_pred_class = (disc_fake.sigmoid() < 0.5).float()
+                    real_acc = (real_pred_class == 1.0).float().mean()
+                    fake_acc = (fake_pred_class == 0.0).float().mean()
+
+                    # Backward pass.
+                    self.disc_scaler.scale(d_loss).backward()
 
                     # Clip gradients for Discriminator.
                     if self.clip_grad is not None:
                         self.disc_scaler.unscale_(self.disc_optim)
                         disc_grad = torch.nn.utils.clip_grad_norm_(
-                            self.vqgan.discriminator.parameters(), 
+                            self.discriminator.parameters(), 
                             self.clip_grad
                         ).item()
-                    else: disc_grad = None
+                    else: disc_grad = -1.0
 
-                    self.logger.log_metric("train/disc_loss", disc_loss, step=adjusted_step)
-                    self.logger.log_metric("train/disc_grad", disc_grad, step=adjusted_step)
-                    self.logger.log_metric("train/disc_real", disc_real.mean().item(), step=adjusted_step)
-                    self.logger.log_metric("train/disc_fake", disc_fake.mean().item(), step=adjusted_step)
-
+                    # Update params.
                     self.disc_scaler.step(self.disc_optim)
                     self.disc_scaler.update()
-                    self.disc_optim.zero_grad()
 
+                    # Log Discriminator metrics.
+                    self.logger.log_metric("gan/d_loss", d_loss.item(), step=adjusted_step - self.disc_start)
+                    self.logger.log_metric("gan/disc_grad", disc_grad, step=adjusted_step - self.disc_start)
+                    self.logger.log_metric("gan/real_acc", real_acc.item(), step=adjusted_step - self.disc_start)
+                    self.logger.log_metric("gan/fake_acc", fake_acc.item(), step=adjusted_step - self.disc_start)
+                
+                # False measurement since we do not wait for GPU to finish?
                 t2 = time.time()
                 imgs_per_sec = self.batch_size / (t2 - t1)
-                self.logger.log_metric("train/imgs_per_sec", imgs_per_sec, step=adjusted_step)
+                self.logger.log_metric("util/imgs_per_sec", imgs_per_sec, step=adjusted_step)
 
-            # Evaluation loop.
-            self.vqgan.eval()
+            # Evaluation Part.
+            self.to_train(False)
+
             recon_loss_dev = 0.0
             percept_loss_dev = 0.0
             perplexity_dev = 0.0
+
             for step, x in tqdm(enumerate(self.dev_loader), total=len(self.dev_loader), desc=f"Dev {epoch}", ncols=100):
                 with torch.no_grad():
                     x = x.to(self.device)
-                    (
-                        vqvae_loss, recon_loss, percept_loss, 
-                        quant_loss, gen_loss, adaptive_weight, perplexity
-                    ) = self.vqgan(x, return_ae_loss=True)
+
+                    # Forward pass.
+                    z = self.encoder(x)
+                    z_q, quant_loss, perplexity = self.codebook(z)
+                    x_hat = self.decoder(z_q).tanh()
+
+                    # Calculate losses.
+                    percept_loss = self.percept_loss(x, x_hat)
+                    recon_loss = self.recon_loss(x, x_hat)
 
                 recon_loss_dev += recon_loss.item() / len(self.dev_loader)
                 percept_loss_dev += percept_loss.item() / len(self.dev_loader)
@@ -202,21 +315,11 @@ class VQGANTrainer:
             checkpoint_path = os.path.join(self.checkpoints_dir, self.run_name, checkpoint_name)
             save_checkpoint(
                 checkpoint_path, 
-                self.vqgan.encoder, 
-                self.vqgan.decoder, 
-                self.vqgan.codebook, 
-                self.vqgan.discriminator, 
-                self.vqvae_optim, 
-                self.disc_optim, 
-                epoch 
+                epoch=epoch,
+                encoder=self.encoder, 
+                decoder=self.decoder, 
+                codebook=self.codebook, 
+                discriminator=self.discriminator, 
+                vqvae_optim=self.vqvae_optim, 
+                disc_optim=self.disc_optim
             )
-
-            # Plot examples to MLflow.
-            images = np.load(self.plot_set)
-            images = torch.from_numpy(images).to(self.device)
-            images = images.permute(0, 3, 1, 2).float() / 255.0
-            images = (images - 0.5) / 0.5
-            with torch.no_grad():
-                reconstructed = self.vqgan(images)
-            figure = plot_images(images, reconstructed)
-            self.logger.log_figure(f"plots/{epoch}_reconstructed.png", figure)
