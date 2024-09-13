@@ -47,38 +47,26 @@ class BasicLogger:
         logging.info(message)
 
 
-def save_checkpoint(path, enc, dec, codebook, disc=None, vqvae_optim=None, disc_optim=None, epoch=None):
+def save_checkpoint(path, epoch=None, **kwargs):
     """Make necessary dirs if needed and save the model checkpoint during training."""
-    param_dict = dict(
-        enc=enc.state_dict(),
-        dec=dec.state_dict(),
-        codebook=codebook.state_dict(),
-        disc=disc.state_dict() if disc else None,
-        vqvae_optim=vqvae_optim.state_dict() if vqvae_optim else None,
-        disc_optim=disc_optim.state_dict() if disc_optim else None,
-        epoch=epoch
-    )
+    # Not the greatest idea,
+    # since when loading you may not know what keys are in checkpoint.
+    param_dict = {
+        name: obj.state_dict() if obj else None for name, obj in kwargs.items()
+    }
+    param_dict['epoch'] = epoch
     folder = os.path.dirname(path)
     os.makedirs(folder, exist_ok=True)
     torch.save(param_dict, path)
 
 
-def load_checkpoint(path, enc, dec, codebook, disc=None, vqvae_optim=None, disc_optim=None):
+def load_checkpoint(path, **kwargs):
     """Load model checkpoint."""
     checkpoint = torch.load(path)
-    enc.load_state_dict(checkpoint["enc"])
-    dec.load_state_dict(checkpoint["dec"])
-    codebook.load_state_dict(checkpoint["codebook"])
-
-    if disc and checkpoint["disc"]:
-        disc.load_state_dict(checkpoint["disc"])
-
-    if vqvae_optim and checkpoint["vqvae_optim"]:
-        vqvae_optim.load_state_dict(checkpoint["vqvae_optim"])
-
-    if disc_optim and checkpoint["disc_optim"]:
-        disc_optim.load_state_dict(checkpoint["disc_optim"])
-
+    for name, obj in kwargs.items():
+        if name in checkpoint:
+            obj.load_state_dict(checkpoint[name])
+    
     epoch = checkpoint["epoch"]
     return epoch
 
