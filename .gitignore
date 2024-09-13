@@ -1,9 +1,9 @@
 # folders
 __pycache__/
 checkpoints/
-configs/
 data/
 logs/
+mlruns/
 
 # files
 dev.ipynb
