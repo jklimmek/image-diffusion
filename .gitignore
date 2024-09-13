@@ -1,0 +1,10 @@
+# folders
+__pycache__/
+checkpoints/
+configs/
+data/
+logs/
+
+# files
+dev.ipynb
+commands.md
