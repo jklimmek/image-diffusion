@@ -3,7 +3,6 @@
 
 import os
 import contextlib
-import numpy as np
 from tqdm import tqdm
 import time
 import torch
@@ -126,8 +125,8 @@ class DiffusionTrainer:
 
                 # Forward pass.
                 with self.ctx:
-                    x_noise_hat = self.unet(x_noise, t, context=c, context_mask=context_mask)
-                    loss = self.criterion(x_noise_hat, noise)
+                    noise_hat = self.unet(x_noise, t, context=c, context_mask=context_mask)
+                    loss = self.criterion(noise_hat, noise)
 
                 # Backward pass.
                 self.scaler.scale(loss).backward()

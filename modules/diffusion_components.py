@@ -27,12 +27,15 @@ class CosineScheduler:
         self.beta_start = beta_start
         self.beta_end = beta_end
 
-        timesteps = torch.arange(num_steps + 1, dtype=torch.float32) / num_steps
-        f = (timesteps + offset) / (1 + offset) * math.pi / 2
-        f = torch.cos(f).pow(2)
-        alphas_hat = f / f[0]
-        betas = 1 - alphas_hat[1:] / alphas_hat[:-1]
-        self.betas = torch.clip(betas, min=0, max=0.999).to(device)
+        # timesteps = torch.arange(num_steps + 1, dtype=torch.float32) / num_steps
+        # f = (timesteps + offset) / (1 + offset) * math.pi / 2
+        # f = torch.cos(f).pow(2)
+        # alphas_hat = f / f[0]
+        # betas = 1 - alphas_hat[1:] / alphas_hat[:-1]
+        # self.betas = torch.clip(betas, min=0, max=0.999).to(device)
+        self.betas = (
+                torch.linspace(beta_start ** 0.5, beta_end ** 0.5, num_steps) ** 2
+        ).to(device)
 
         self.alphas = 1. - self.betas
         self.alpha_cum_prod = torch.cumprod(self.alphas, dim=0)
@@ -326,7 +329,7 @@ class Unet(nn.Module):
 
         self.upsamples = nn.ModuleList(
             [
-                Upsample(channels[::-1][i + 1] * 2) if change_res[::-1][i] else nn.Identity() for i in range(len(change_res))
+                Upsample(channels[::-1][i]) if change_res[::-1][i] else nn.Identity() for i in range(len(change_res))
             ]
         )
 
@@ -342,8 +345,6 @@ class Unet(nn.Module):
         t = self.time_embedding(timestep)
 
         # Class embedding.
-        # Instead of learning null-class token for CFG, 
-        # simply provide no information at all.
         if context is not None:
             class_onehot = F.one_hot(context, self.num_classes).float()
             c = einops.einsum(class_onehot, self.class_embedding.weight, "b c, c d -> b d")
@@ -363,7 +364,7 @@ class Unet(nn.Module):
         # Mid.
         for i in range(len(self.mid_blocks)):
             x = self.mid_blocks[i](x, t)
-
+        
         # Up.
         for i in range(len(self.ups)):
             out_down = out_downs.pop()
