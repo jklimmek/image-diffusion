@@ -3,7 +3,8 @@ import re
 import yaml
 import logging
 from datetime import datetime
-from numpy import transpose
+from collections import deque
+import numpy as np
 import matplotlib.pyplot as plt
 import mlflow
 import torch
@@ -11,7 +12,7 @@ import torch
 
 class BasicLogger:
 
-    def __init__(self, logs_dir: str, run_name: str, no_mlflow: bool):
+    def __init__(self, logs_dir: str, run_name: str, no_mlflow: bool, log_interval: int):
         
         # set up default logging.
         logging.basicConfig(
@@ -20,8 +21,10 @@ class BasicLogger:
             datefmt="[%H:%M:%S]"
         )
 
-        # Track experiment if specified.
         self.no_mlflow = no_mlflow
+        self.log_interval = log_interval
+
+        # Track experiment if specified.
         if not self.no_mlflow:
             os.makedirs(logs_dir, exist_ok=True)
             mlflow.set_tracking_uri(f"sqlite:///{logs_dir}/mlflow.db")
@@ -46,6 +49,25 @@ class BasicLogger:
         """Log message to console."""
         logging.info(message)
 
+
+class MetricHolder:
+
+    def __init__(self, buff_size):
+        self.buff_size = buff_size
+        self.metrics = dict()
+
+    def store_variable(self, name, val):
+        if name not in self.metrics.keys():
+            self.metrics[name] = deque(maxlen=self.buff_size)
+        if isinstance(val, torch.Tensor):
+            val = val.item()
+        self.metrics[name].append(val)
+
+    def compute_metric(self, name):
+        val = np.mean(self.metrics[name])
+        self.metrics[name].clear()
+        return val
+    
 
 def save_checkpoint(path, epoch=None, **kwargs):
     """Make necessary dirs if needed and save the model checkpoint during training."""
@@ -125,12 +147,12 @@ def plot_images(images, reconstructed):
         orig_img = normalize_to_image(images[i])
         recon_img = normalize_to_image(reconstructed[i])
 
-        axs[i, 0].imshow(transpose(orig_img, (1, 2, 0)))
+        axs[i, 0].imshow(np.transpose(orig_img, (1, 2, 0)))
         axs[i, 0].axis('off')
         if i == 0:
             axs[i, 0].set_title(column_titles[0], fontsize=16)
 
-        axs[i, 1].imshow(transpose(recon_img, (1, 2, 0)))
+        axs[i, 1].imshow(np.transpose(recon_img, (1, 2, 0)))
         axs[i, 1].axis('off')
         if i == 0:
             axs[i, 1].set_title(column_titles[1], fontsize=16)

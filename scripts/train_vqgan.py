@@ -74,13 +74,15 @@ def main():
     # Set up training components.
     train_ds = VQDataset(args["train_set"], transforms=transforms)
     dev_ds = VQDataset(args["dev_set"], transforms=transforms)
-    logger = BasicLogger(args["logs_dir"], args["run_name"], args["no_mlflow"])
+    logger = BasicLogger(args["logs_dir"], args["run_name"], args["no_mlflow"], args["log_interval"])
+    holder = MetricHolder(args["log_interval"])
     
     trainer = VQGANTrainer(
         args,
         train_ds,
         dev_ds,
-        logger
+        logger,
+        holder
     )
 
     trainer.train()

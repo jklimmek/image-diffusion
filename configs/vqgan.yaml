@@ -2,13 +2,13 @@
 in_channels: 3
 channels: [64, 128, 256]
 enc_num_res_blocks: 2
-dec_num_res_blocks: 2
+dec_num_res_blocks: 3
 attn_resolutions: []
-codebook_size: 8192
-codebook_beta: 0.2
+codebook_size: 1024
+codebook_beta: 0.25
 codebook_gamma: 0.99
 disc_channels: [64, 128, 256]
-z_dim: 3
+z_dim: 64
 init_resolution: 128
 num_groups: 32
 
@@ -16,20 +16,22 @@ num_groups: 32
 recon_weight: 1.0
 percept_weight: 1.0
 quant_weight: 1.0
-disc_weight: 0.5
-disc_start: 10
-learning_rate: 2.25e-5
-batch_size: 12
-total_epochs: 10
-epochs: 10
+disc_weight: 0.1
+disc_start: 1
+grad_penalty: 10
+learning_rate: 1e-4
+batch_size: 8
+total_epochs: 20
+epochs: 9
 clip_grad: 1.0
 precision: fp32
 
 # Util.
-train_set: ./data/vqgan/dev.npy
+train_set: ./data/vqgan/train.npy
 dev_set: ./data/vqgan/dev.npy
-plot_set: ./data/plot.npy
+plot_set: ./data/vqgan/plot.npy
 checkpoints_dir: ./checkpoints
 logs_dir: ./logs
 seed: 2018
-log_imgs_freq: 1000
+log_imgs_freq: 500
+log_interval: 10

@@ -9,6 +9,8 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
+from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity as LPIPS
 from itertools import chain
@@ -18,6 +20,23 @@ from modules.vqgan_components import *
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Arguments other than a weight enum.*")
 warnings.filterwarnings("ignore", category=UserWarning, message=".*pretrained.*")
+
+
+def hinge_disc_loss(fake, real):
+    loss_fake = torch.mean(F.relu(1. + fake))
+    loss_real = torch.mean(F.relu(1. - real))
+    d_loss = 0.5 * (loss_real + loss_fake)
+    return d_loss
+
+
+def gen_nonsaturating_loss(fake):
+    g_loss = F.softplus(-fake).mean()
+    return g_loss
+
+
+def recon_loss(real, fake):
+    r_loss = F.mse_loss(fake, real) + F.l1_loss(fake, real)
+    return r_loss 
     
 
 class VQGANTrainer:
@@ -27,7 +46,8 @@ class VQGANTrainer:
             args,
             train_set,
             dev_set,
-            logger
+            logger,
+            holder
         ):
         
         for k, v in args.items():
@@ -72,10 +92,12 @@ class VQGANTrainer:
         self.discriminator.to(self.device)
 
         self.logger = logger
+        self.holder = holder
 
         # Set up losses.
-        self.recon_loss = nn.MSELoss().to(self.device)
-        self.disc_loss = nn.BCEWithLogitsLoss().to(self.device)
+        self.recon_loss = recon_loss
+        self.disc_loss = hinge_disc_loss
+        self.gen_loss = gen_nonsaturating_loss
         self.percept_loss = LPIPS(net_type="vgg").eval().to(self.device)
         for param in self.percept_loss.parameters():
             if param.requires_grad:
@@ -128,10 +150,6 @@ class VQGANTrainer:
         self.dev_loader = DataLoader(dev_set, batch_size=self.batch_size, pin_memory=True, shuffle=False)
         self.logger.log_console(f"Train set has {len(train_set)} items. Dev set has {len(dev_set)} items.")
 
-        checkpoints_path = os.path.join(self.checkpoints_dir, self.run_name)
-        os.makedirs(checkpoints_path, exist_ok=True)
-        os.makedirs(self.logs_dir, exist_ok=True)
-
         # Load checkpoint
         if self.checkpoint is not None:
             self.curr_epoch = load_checkpoint(
@@ -148,11 +166,39 @@ class VQGANTrainer:
             self.curr_epoch = 0
             self.logger.log_console("No checkpoint provided. Training from scratch.")
 
-    def to_train(self, mode):
-        self.encoder.train(mode)
-        self.decoder.train(mode)
-        self.codebook.train(mode)
-        self.discriminator.train(mode)
+    def to_train(self, mode, modules="all"):
+        # module: "vqgan", "disc" or "all"
+        if modules == "vqgan":
+            self.encoder.train(mode)
+            self.decoder.train(mode)
+            self.codebook.train(mode)
+
+        elif modules == "disc":
+            self.discriminator.train(mode)
+
+        elif modules == "all":
+            self.encoder.train(mode)
+            self.decoder.train(mode)
+            self.codebook.train(mode)
+            self.discriminator.train(mode)
+
+    def calculate_gradient_penalty(self, real_images, fake_images, lambda_term):
+        eta = torch.FloatTensor(real_images.shape[0],1,1,1).uniform_(0,1).to(self.device)
+        eta = eta.expand(real_images.shape[0], real_images.size(1), real_images.size(2), real_images.size(3))
+        
+        interpolated = eta * real_images + ((1 - eta) * fake_images)
+        interpolated = Variable(interpolated, requires_grad=True)
+        prob_interpolated = self.discriminator(interpolated)
+        
+        gradients = torch.autograd.grad(
+            outputs=prob_interpolated, 
+            inputs=interpolated,
+            grad_outputs=torch.ones(prob_interpolated.size()).to(self.device),
+            create_graph=True, 
+            retain_graph=True,)[0]
+        
+        grad_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * lambda_term
+        return grad_penalty
 
     def train(self):
 
@@ -161,8 +207,6 @@ class VQGANTrainer:
         for epoch in range(self.curr_epoch, last_epoch):
 
             # Training part.
-            self.to_train(True)
-
             for step, x in tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc=f"Epoch {epoch}", ncols=100):
                 
                 adjusted_step = epoch * len(self.train_loader) + step
@@ -177,41 +221,95 @@ class VQGANTrainer:
                     with torch.no_grad():
                         z = self.encoder(images)
                         z_q, _, _ = self.codebook(z)
-                        reconstructed = self.decoder(z_q).tanh()
+                        reconstructed = self.decoder(z_q).clamp(-1.0, 1.0)
                     figure = plot_images(images, reconstructed)
-                    self.logger.log_figure(f"plots/{epoch}_reconstructed.png", figure)
-                    self.to_train(True)
+                    self.logger.log_figure(f"plots/{adjusted_step}_reconstructed.png", figure)
 
+                # Stuff.
                 t1 = time.time()
                 x = x.to(self.device)
                 
-                # (1) Update Generator (VAE).
-                self.vqvae_optim.zero_grad()
+                # (1) Update Discriminator.
+                if self.disc_start <= adjusted_step:
+                    self.to_train(True, modules="disc")
+                    self.to_train(False, modules="vqgan")
+                    with self.ctx:
+                        
+                        # Generate fake images.
+                        z = self.encoder(x)
+                        z_q, _, _ = self.codebook(z)
+                        x_hat = self.decoder(z_q).clamp(-1.0, 1.0)
+
+                        # Discriminator forward pass.
+                        disc_fake = self.discriminator(x_hat)
+                        disc_real = self.discriminator(x)
+
+                        # Calculate gradient penalty.
+                        gp = self.calculate_gradient_penalty(x, x_hat, self.grad_penalty)
+                        d_loss = self.disc_loss(disc_fake, disc_real)
+                        disc_loss = self.disc_weight * d_loss + gp
+
+                    # Calculate Discriminator accuracy.
+                    real_pred_class = (disc_real.sigmoid() >= 0.5).float()
+                    fake_pred_class = (disc_fake.sigmoid() < 0.5).float()
+                    real_acc = real_pred_class.mean()
+                    fake_acc = fake_pred_class.mean()
+
+                    # Discriminator backward pass.
+                    self.disc_scaler.scale(disc_loss).backward()
+
+                    # Clip gradients for Discriminator.
+                    if self.clip_grad is not None:
+                        self.disc_scaler.unscale_(self.disc_optim)
+                        disc_grad = torch.nn.utils.clip_grad_norm_(
+                            self.discriminator.parameters(), 
+                            self.clip_grad
+                        ).item()
+                    else: disc_grad = -1.0
+
+                    # Update Discriminator params.
+                    self.disc_scaler.step(self.disc_optim)
+                    self.disc_scaler.update()
+                    self.disc_optim.zero_grad()
+
+                    # Store Discriminator metrics.
+                    self.holder.store_variable("gan/d_loss", d_loss)
+                    self.holder.store_variable("gan/disc_grad", disc_grad)
+                    self.holder.store_variable("gan/gp", gp)
+                    self.holder.store_variable("gan/real_acc", real_acc)
+                    self.holder.store_variable("gan/fake_acc", fake_acc)
+
+                # (2) Update Generator (VQ-VAE).
+                self.to_train(False, modules="disc")
+                self.to_train(True, modules="vqgan")
                 with self.ctx:
 
-                    # Forward pass.
+                    # Generate fake images.
                     z = self.encoder(x)
                     z_q, quant_loss, perplexity = self.codebook(z)
-                    x_hat = self.decoder(z_q).tanh()
+                    x_hat = self.decoder(z_q).clamp(-1.0, 1.0)
 
-                    # Calculate losses.
-                    percept_loss = self.percept_loss(x, x_hat)
+                    # Calculate Generator losses.
                     recon_loss = self.recon_loss(x, x_hat)
+                    percept_loss = self.percept_loss(x, x_hat)
 
-                    vae_loss = (
+                    # Combined Generator loss.
+                    vqvae_loss = (
                         percept_loss * self.percept_weight +
                         recon_loss * self.recon_weight +
                         quant_loss * self.quant_weight
                     )
-                    if self.disc_start < adjusted_step: 
-                        disc_patches = self.discriminator(x_hat)
-                        g_loss = self.disc_loss(disc_patches, torch.ones_like(disc_patches, device=self.device))
-                        vae_loss += self.disc_weight * g_loss
-                
-                # Backward pass.
-                self.vqvae_scaler.scale(vae_loss).backward()
 
-                # Clip gradients for VAE.
+                    # Add Discriminator factor if time is right.
+                    if self.disc_start <= adjusted_step: 
+                        disc_patches = self.discriminator(x_hat)
+                        g_loss = self.gen_loss(disc_patches)
+                        vqvae_loss += self.disc_weight * g_loss
+                
+                # Generator backward pass.
+                self.vqvae_scaler.scale(vqvae_loss).backward()
+
+                # Clip gradients for Generator.
                 if self.clip_grad is not None:
                     self.vqvae_scaler.unscale_(self.vqvae_optim)
                     vqvae_grad = nn.utils.clip_grad_norm_(
@@ -226,65 +324,38 @@ class VQGANTrainer:
                     ).item()
                 else: vqvae_grad = -1.0
 
-                # Update params.
+                # Update Generator params.
                 self.vqvae_scaler.step(self.vqvae_optim)
                 self.vqvae_scaler.update()
+                self.vqvae_optim.zero_grad()
                 
-                # Log VAE metrics.
-                self.logger.log_metric("vae/recon_loss", recon_loss.item(), step=adjusted_step)
-                self.logger.log_metric("vae/percept_loss", percept_loss.item(), step=adjusted_step)
-                self.logger.log_metric("vae/quant_loss", quant_loss.item(), step=adjusted_step)
-                self.logger.log_metric("vae/vqvae_grad", vqvae_grad, step=adjusted_step)
-                self.logger.log_metric("vae/perplexity", perplexity, step=adjusted_step)
-                if self.disc_start < adjusted_step: 
-                    self.logger.log_metric("gan/g_loss", g_loss.item(), step=adjusted_step - self.disc_start)
-
-                # (2) Update Discriminator.
-                self.disc_optim.zero_grad()
-                if self.disc_start < adjusted_step: 
-                    with self.ctx:
-                        disc_real = self.discriminator(x)
-                        disc_fake = self.discriminator(x_hat.detach())
-                        real_loss = self.disc_loss(disc_real, torch.ones_like(disc_real, device=self.device))
-                        fake_loss = self.disc_loss(disc_fake, torch.zeros_like(disc_fake, device=self.device))
-                        d_loss = self.disc_weight * (real_loss + fake_loss) / 2
-
-                    # Calculate accuracies of Discriminator.
-                    real_pred_class = (disc_real.sigmoid() >= 0.5).float()
-                    fake_pred_class = (disc_fake.sigmoid() < 0.5).float()
-                    real_acc = (real_pred_class == 1.0).float().mean()
-                    fake_acc = (fake_pred_class == 0.0).float().mean()
-
-                    # Backward pass.
-                    self.disc_scaler.scale(d_loss).backward()
-
-                    # Clip gradients for Discriminator.
-                    if self.clip_grad is not None:
-                        self.disc_scaler.unscale_(self.disc_optim)
-                        disc_grad = torch.nn.utils.clip_grad_norm_(
-                            self.discriminator.parameters(), 
-                            self.clip_grad
-                        ).item()
-                    else: disc_grad = -1.0
-
-                    # Update params.
-                    self.disc_scaler.step(self.disc_optim)
-                    self.disc_scaler.update()
-
-                    # Log Discriminator metrics.
-                    self.logger.log_metric("gan/d_loss", d_loss.item(), step=adjusted_step - self.disc_start)
-                    self.logger.log_metric("gan/disc_grad", disc_grad, step=adjusted_step - self.disc_start)
-                    self.logger.log_metric("gan/real_acc", real_acc.item(), step=adjusted_step - self.disc_start)
-                    self.logger.log_metric("gan/fake_acc", fake_acc.item(), step=adjusted_step - self.disc_start)
+                # Store Generator metrics.
+                self.holder.store_variable("vqvae/recon_loss", recon_loss)
+                self.holder.store_variable("vqvae/percept_loss", percept_loss)
+                self.holder.store_variable("vqvae/quant_loss", quant_loss)
+                self.holder.store_variable("vqvae/vqvae_grad", vqvae_grad)
+                self.holder.store_variable("vqvae/perplexity", perplexity)
+                if self.disc_start < adjusted_step:
+                    self.holder.store_variable("gan/g_loss", g_loss)
                 
                 # False measurement since we do not wait for GPU to finish?
                 t2 = time.time()
                 imgs_per_sec = self.batch_size / (t2 - t1)
-                self.logger.log_metric("util/imgs_per_sec", imgs_per_sec, step=adjusted_step)
+                self.holder.store_variable("util/imgs_per_sec", imgs_per_sec)
+
+                # Log metrics to MLflow.
+                if (adjusted_step + 1) % self.log_interval == 0:
+                    for key in self.holder.metrics.keys():
+                        metric = self.holder.compute_metric(key)
+                        if "gan" in key:
+                            disc_step = adjusted_step - self.disc_start
+                            self.logger.log_metric(key, metric, step=disc_step)
+                        else:
+                            self.logger.log_metric(key, metric, step=adjusted_step)
+
 
             # Evaluation Part.
             self.to_train(False)
-
             recon_loss_dev = 0.0
             percept_loss_dev = 0.0
             perplexity_dev = 0.0
@@ -296,7 +367,7 @@ class VQGANTrainer:
                     # Forward pass.
                     z = self.encoder(x)
                     z_q, quant_loss, perplexity = self.codebook(z)
-                    x_hat = self.decoder(z_q).tanh()
+                    x_hat = self.decoder(z_q).clamp(-1.0, 1.0)
 
                     # Calculate losses.
                     percept_loss = self.percept_loss(x, x_hat)

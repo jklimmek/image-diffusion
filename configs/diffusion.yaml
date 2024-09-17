@@ -1,9 +1,9 @@
 # Architecture.
 z_dim: 3
-channels: [64, 128, 256, 512]
+channels: [128, 256, 384, 512]
 mid_channels: [512, 512]
 change_res: [True, True, True]
-time_dim: 256
+time_dim: 512
 num_res_layers: 2
 num_heads: 8
 num_groups: 32
@@ -17,10 +17,10 @@ beta_end: 0.02
 offset: 8e-3
 
 # Training.
-learning_rate: 5e-6 #2.25e-5 # 
-batch_size: 24
+learning_rate: 5e-6
+batch_size: 64
 total_epochs: 50
-epochs: 50
+epochs: 10
 clip_grad: 1.0
 precision: fp32
 

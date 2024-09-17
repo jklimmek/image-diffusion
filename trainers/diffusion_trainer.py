@@ -109,17 +109,20 @@ class DiffusionTrainer:
                 adjusted_step = epoch * len(self.train_loader) + step
                 t1 = time.time()
 
-                # Move data to device, sample noise and timestep.
+                # Move data to device.
                 x = x.to(self.device)
                 c = c.to(self.device).long()
-                noise = torch.randn_like(x, device=self.device)
-                t = torch.randint(0, self.num_steps, (B,), device=self.device)
 
-                # Add noise to latents.
-                x_noise = self.scheduler.add_noise(x, noise, t)
-
-                # Decide whether not to include class info for CFG.
                 with torch.no_grad():
+                    
+                    # Sample noise and timestep.
+                    noise = torch.randn_like(x, device=self.device)
+                    t = torch.randint(0, self.num_steps, (B,), device=self.device)
+
+                    # Add noise to latents.
+                    x_noise = self.scheduler.add_noise(x, noise, t)
+                    
+                    # Decide whether not to include class info for CFG.
                     c_prob = torch.rand(B, device=self.device)
                     context_mask = (c_prob > self.cond_drop_prob).unsqueeze(1)
 
@@ -154,7 +157,7 @@ class DiffusionTrainer:
                 self.logger.log_metric("unet/loss", loss.item(), step=adjusted_step)
                 self.logger.log_metric("unet/grad", grad, step=adjusted_step)
                 self.logger.log_metric("unet/samples_per_sec", samples_per_sec, step=adjusted_step)
-            self.logger.log_metric("unet/epoch_loss", epoch_loss, step=adjusted_step)
+            self.logger.log_metric("unet/epoch_loss", epoch_loss, step=epoch)
 
             # Evaluation Part.
             # todo: implement diffusion for selected images.
