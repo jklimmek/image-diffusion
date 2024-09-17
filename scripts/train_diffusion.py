@@ -65,12 +65,14 @@ def main():
 
     # Set up training components.
     train_ds = DiffusionDataset(args["train_set"], args["train_labels"])
-    logger = BasicLogger(args["logs_dir"], args["run_name"], args["no_mlflow"])
+    logger = BasicLogger(args["logs_dir"], args["run_name"], args["no_mlflow"], args["log_interval"])
+    holder = MetricHolder(args["log_interval"])
     
     trainer = DiffusionTrainer(
         args,
         train_ds,
-        logger
+        logger,
+        holder
     )
 
     trainer.train()

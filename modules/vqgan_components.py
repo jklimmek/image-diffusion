@@ -378,25 +378,41 @@ class Discriminator(nn.Module):
         super().__init__()
         self.in_channels = in_channels
         layers_dim = [self.in_channels] + channels + [1]
+        
         self.layers = nn.ModuleList(
             [
                 nn.Sequential(
                     nn.Conv2d(
                         layers_dim[i], layers_dim[i + 1],   
                         kernel_size=4,
-                        stride=2,
+                        stride=2 if i != len(layers_dim) - 2 else 1,
                         padding=1,
-                        bias=False if i != 0 else True
+                        bias=(i == 0 or i == len(layers_dim) - 2)
                     ),
                     nn.BatchNorm2d(layers_dim[i + 1]) if i != len(layers_dim) - 2 and i != 0 else nn.Identity(),
-                    nn.LeakyReLU(0.2) if i != len(layers_dim) - 2 else nn.Identity()
+                    nn.LeakyReLU(0.2, inplace=True) if i != len(layers_dim) - 2 else nn.Identity()
                 )
                 for i in range(len(layers_dim) - 1)
             ]
         )
-    
+
+        self.apply(self.init_weights)
+
     def forward(self, x):
         out = x
         for layer in self.layers:
             out = layer(out)
         return out
+
+    def init_weights(self, m):
+        init_gain = 0.02
+        classname = m.__class__.__name__
+
+        if hasattr(m, 'weight') and classname.find('Conv') != -1:
+            nn.init.normal_(m.weight.data, 0.0, init_gain)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias.data, 0.0)
+                
+        elif classname.find('BatchNorm2d') != -1:
+            nn.init.normal_(m.weight.data, 1.0, init_gain)
+            nn.init.constant_(m.bias.data, 0.0)
