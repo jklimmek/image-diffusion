@@ -31,4 +31,4 @@ plot_set: ./data/plot.npy
 checkpoints_dir: ./checkpoints
 logs_dir: ./logs
 seed: 2018
-log_imgs_freq: 1000
+log_interval: 50

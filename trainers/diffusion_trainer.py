@@ -1,5 +1,5 @@
 # Modules :
-# - DiffusionTrainer
+# - DiffusionTrainer ✔️
 
 import os
 import contextlib
@@ -19,7 +19,8 @@ class DiffusionTrainer:
             self,
             args,
             train_set,
-            logger
+            logger,
+            holder
         ):
         
         for k, v in args.items():
@@ -48,6 +49,7 @@ class DiffusionTrainer:
         )
 
         self.logger = logger
+        self.holder = holder
 
         # Set up loss.
         self.criterion = nn.MSELoss()
@@ -153,10 +155,17 @@ class DiffusionTrainer:
                 samples_per_sec = self.batch_size / (t2 - t1)
                 epoch_loss += loss.item() / len(self.train_loader)
 
-                # Log Unet metrics.
-                self.logger.log_metric("unet/loss", loss.item(), step=adjusted_step)
-                self.logger.log_metric("unet/grad", grad, step=adjusted_step)
-                self.logger.log_metric("unet/samples_per_sec", samples_per_sec, step=adjusted_step)
+                # Store Unet metrics.
+                self.holder.store_variable("unet/loss", loss)
+                self.holder.store_variable("unet/grad", grad)
+                self.holder.store_variable("unet/samples_per_sec", samples_per_sec)
+
+                # Log metrics to MLflow.
+                if (adjusted_step + 1) % self.log_interval == 0:
+                    for key in self.holder.metrics.keys():
+                        metric = self.holder.compute_metric(key)
+                        self.logger.log_metric(key, metric, step=adjusted_step)
+
             self.logger.log_metric("unet/epoch_loss", epoch_loss, step=epoch)
 
             # Evaluation Part.
