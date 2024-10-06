@@ -10,8 +10,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity as LPIPS
+from torchmetrics.image.fid import FrechetInceptionDistance as FID
 from itertools import chain
 from modules.util import *
 from modules.vqgan_components import *
@@ -21,22 +22,60 @@ warnings.filterwarnings("ignore", category=UserWarning, message=".*Arguments oth
 warnings.filterwarnings("ignore", category=UserWarning, message=".*pretrained.*")
 
 
-def recon_loss(real, fake):
+# Reconstruction loss
+def recon_loss(real: torch.Tensor, fake: torch.Tensor):
     r_loss = F.mse_loss(fake, real) + F.l1_loss(fake, real)
     return r_loss 
-    
+
+
+# Hinge losses
+def hinge_d_loss(fake: torch.Tensor, real: torch.Tensor):
+    loss_fake = torch.mean(F.relu(1.0 + fake))
+    loss_real = torch.mean(F.relu(1.0 - real))
+    d_loss = 0.5 * (loss_real + loss_fake)
+    return d_loss
+
+def hinge_g_loss(fake: torch.Tensor):
+    g_loss = -torch.mean(fake)
+    return g_loss
+
+
+# MSE losses.
+def mse_d_loss(fake: torch.Tensor, real: torch.Tensor):
+    loss_fake = F.mse_loss(fake.clamp(0.0, 1.0), torch.zeros_like(fake, device=fake.device))
+    loss_real = F.mse_loss(real.clamp(0.0, 1.0), torch.ones_like(real, device=real.device))
+    d_loss = 0.5 * (loss_real + loss_fake)
+    return d_loss
+
+def mse_g_loss(fake: torch.Tensor):
+    g_loss = F.mse_loss(fake, torch.ones_like(fake, device=fake.device))
+    return g_loss
+
+
+# BCE losses.
+def bce_d_loss(fake: torch.Tensor, real: torch.Tensor):
+    loss_fake = F.binary_cross_entropy_with_logits(fake, torch.zeros_like(fake, device=fake.device))
+    loss_real = F.binary_cross_entropy_with_logits(real, torch.ones_like(real, device=real.device))
+    d_loss = 0.5 * (loss_real + loss_fake)
+    return d_loss
+
+def bce_g_loss(fake: torch.Tensor):
+    g_loss = F.binary_cross_entropy_with_logits(fake, torch.ones_like(fake, device=fake.device))
+    return g_loss
+
 
 class VQGANTrainer:
 
     def __init__(
             self,
-            args,
-            train_set,
-            dev_set,
-            logger,
-            holder
+            args: dict,
+            train_set: Dataset,
+            dev_set: Dataset,
+            logger: BasicLogger,
+            holder: MetricHolder
         ):
         
+        # Set training arguemnts as attributes.
         for k, v in args.items():
             setattr(self, k, v)
 
@@ -83,11 +122,15 @@ class VQGANTrainer:
 
         # Set up losses.
         self.recon_loss = recon_loss
-        self.disc_loss = nn.BCEWithLogitsLoss().to(self.device)
+        self.d_loss = {"mse": mse_d_loss, "bce": bce_d_loss, "hinge": hinge_d_loss}[self.gan_loss]
+        self.g_loss = {"mse": mse_g_loss, "bce": bce_g_loss, "hinge": hinge_g_loss}[self.gan_loss]
         self.percept_loss = LPIPS(net_type="vgg").eval().to(self.device)
         for param in self.percept_loss.parameters():
             if param.requires_grad:
                 param.requires_grad_(False)
+        
+        # Set up recunstruction quality metrics.
+        self.fid = FID(reset_real_features=False, normalize=True).eval().to(self.device)
 
         # Set up optimizers.
         disc_params = list(self.discriminator.parameters())
@@ -132,11 +175,12 @@ class VQGANTrainer:
         )
     
         # Set up dataloaders.
-        self.train_loader = DataLoader(train_set, batch_size=self.batch_size, pin_memory=True, shuffle=True)
-        self.dev_loader = DataLoader(dev_set, batch_size=self.batch_size, pin_memory=True, shuffle=False)
+        # `num_workers` should be set to `os.cpu_count()` but somehow it makes the training slower.
+        self.train_loader = DataLoader(train_set, batch_size=self.batch_size, pin_memory=True, shuffle=True, num_workers=0)
+        self.dev_loader = DataLoader(dev_set, batch_size=self.batch_size, pin_memory=True, shuffle=False, num_workers=0)
         self.logger.log_console(f"Train set has {len(train_set)} items. Dev set has {len(dev_set)} items.")
 
-        # Load checkpoint
+        # Load model checkpoint.
         if self.checkpoint is not None:
             self.curr_epoch = load_checkpoint(
                 self.checkpoint,
@@ -152,19 +196,37 @@ class VQGANTrainer:
             self.curr_epoch = 0
             self.logger.log_console("No checkpoint provided. Training from scratch.")
 
-    def to_train(self, mode):
+        # Compile the model if specified. Works only on Linux.
+        if self.compile:
+            self.logger.log_console("Model is compiling. This will take a few minutes.")
+            self.encoder = torch.compile(self.encoder)
+            self.decoder = torch.compile(self.decoder)
+            self.codebook = torch.compile(self.codebook)
+            self.discriminator = torch.compile(self.discriminator)
+
+    def to_train(self, mode: bool):
+        """Set components to train or val mode."""
         self.encoder.train(mode)
         self.decoder.train(mode)
         self.codebook.train(mode)
         self.discriminator.train(mode)
 
     def train(self):
+        """Start VQ-GAN training!"""
+        
+        # Log hyperparameteres to MLflow. 
+        self.logger.log_params(
+            lr=self.learning_rate,
+            disc_weight=self.disc_weight,
+            disc_start=self.disc_start,
+            loss=self.gan_loss
+        )
 
         # Start training run.
-        last_epoch = min(self.epochs, self.total_epochs)
-        for epoch in range(self.curr_epoch, last_epoch):
+        for epoch in range(self.curr_epoch, self.epochs):
 
             # Training part.
+            self.to_train(True)
             for step, x in tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc=f"Epoch {epoch}", ncols=100):
                 
                 adjusted_step = epoch * len(self.train_loader) + step
@@ -182,36 +244,78 @@ class VQGANTrainer:
                         reconstructed = self.decoder(z_q).clamp(-1.0, 1.0)
                     figure = plot_images(images, reconstructed)
                     self.logger.log_figure(f"plots/{adjusted_step}_reconstructed.png", figure)
+                    self.to_train(True)
 
-                # Stuff.
+                # Measure time and move data to device.
                 t1 = time.time()
                 x = x.to(self.device)
-                
-                # (1) Update Generator (VAE).
+
+                # Reconstructions.
+                with self.ctx:
+                    z = self.encoder(x)
+                    z_q, quant_loss, perplexity = self.codebook(z)
+                    x_hat = self.decoder(z_q).clamp(-1.0, 1.0)
+
+                # (1) Update Discriminator.
+                if adjusted_step >= self.disc_start:
+
+                    self.disc_optim.zero_grad()
+                    with self.ctx:
+                        
+                        # Discriminator loss.
+                        disc_fake = self.discriminator(x_hat.detach())
+                        disc_real = self.discriminator(x)
+                        d_loss = self.d_loss(disc_fake, disc_real)
+                        disc_loss = self.disc_weight * d_loss
+                        
+                    # Calculate accuracies of Discriminator.
+                    fake_pred_class = (disc_fake.sigmoid() < 0.5).float()
+                    real_pred_class = (disc_real.sigmoid() >= 0.5).float()
+                    fake_acc = fake_pred_class.mean()
+                    real_acc = real_pred_class.mean()
+
+                    # Backward Discriminator pass.
+                    self.disc_scaler.scale(disc_loss).backward()
+
+                    # Clip gradients for Discriminator.
+                    if self.clip_grad is not None:
+                        self.disc_scaler.unscale_(self.disc_optim)
+                        disc_grad = torch.nn.utils.clip_grad_norm_(
+                            self.discriminator.parameters(), 
+                            self.clip_grad
+                        ).item()
+                    else: disc_grad = -1.0
+
+                    # Update Discriminator params.
+                    self.disc_scaler.step(self.disc_optim)
+                    self.disc_scaler.update()
+
+                    # Store Discriminator metrics.
+                    self.holder.store_variable("gan/d_loss", d_loss)
+                    self.holder.store_variable("gan/disc_grad", disc_grad)
+                    self.holder.store_variable("gan/real_acc", real_acc)
+                    self.holder.store_variable("gan/fake_acc", fake_acc)
+
+                # (2) Update Generator (VAE).
                 self.vqvae_optim.zero_grad()
                 with self.ctx:
 
-                    # Forward pass.
-                    z = self.encoder(x)
-                    z_q, quant_loss, perplexity = self.codebook(z)
-                    x_hat = self.decoder(z_q).tanh()
-
-                    # Calculate losses.
+                    # Calculate Generator losses.
                     percept_loss = self.percept_loss(x, x_hat)
                     recon_loss = self.recon_loss(x, x_hat)
-
-                    vae_loss = (
+                    gen_loss = (
                         percept_loss * self.percept_weight +
                         recon_loss * self.recon_weight +
                         quant_loss * self.quant_weight
                     )
-                    if self.disc_start < adjusted_step: 
-                        disc_patches = self.discriminator(x_hat)
-                        g_loss = self.disc_loss(disc_patches, torch.ones_like(disc_patches, device=self.device))
-                        vae_loss += self.disc_weight * g_loss
-                
+
+                    if adjusted_step >= self.disc_start:
+                        g_loss = self.g_loss(self.discriminator(x_hat))
+                        gen_loss += g_loss * self.disc_weight
+                        self.holder.store_variable("gan/g_loss", g_loss)
+
                 # Backward pass.
-                self.vqvae_scaler.scale(vae_loss).backward()
+                self.vqvae_scaler.scale(gen_loss).backward()
 
                 # Clip gradients for VAE.
                 if self.clip_grad is not None:
@@ -238,50 +342,9 @@ class VQGANTrainer:
                 self.holder.store_variable("vqvae/quant_loss", quant_loss)
                 self.holder.store_variable("vqvae/vqvae_grad", vqvae_grad)
                 self.holder.store_variable("vqvae/perplexity", perplexity)
-                if self.disc_start < adjusted_step:
-                    self.holder.store_variable("gan/g_loss", g_loss)
 
-                # (2) Update Discriminator.
-                self.disc_optim.zero_grad()
-                if self.disc_start < adjusted_step: 
-                    with self.ctx:
-                        disc_real = self.discriminator(x)
-                        disc_fake = self.discriminator(x_hat.detach())
-                        real_loss = self.disc_loss(disc_real, torch.ones_like(disc_real, device=self.device))
-                        fake_loss = self.disc_loss(disc_fake, torch.zeros_like(disc_fake, device=self.device))
-                        
-                        d_loss = (real_loss + fake_loss) / 2
-                        disc_loss =  d_loss * self.disc_weight
-
-                    # Calculate accuracies of Discriminator.
-                    real_pred_class = (disc_real.sigmoid() >= 0.5).float()
-                    fake_pred_class = (disc_fake.sigmoid() < 0.5).float()
-                    real_acc = real_pred_class.mean()
-                    fake_acc = fake_pred_class.mean()
-
-                    # Backward pass.
-                    self.disc_scaler.scale(disc_loss).backward()
-
-                    # Clip gradients for Discriminator.
-                    if self.clip_grad is not None:
-                        self.disc_scaler.unscale_(self.disc_optim)
-                        disc_grad = torch.nn.utils.clip_grad_norm_(
-                            self.discriminator.parameters(), 
-                            self.clip_grad
-                        ).item()
-                    else: disc_grad = -1.0
-
-                    # Update params.
-                    self.disc_scaler.step(self.disc_optim)
-                    self.disc_scaler.update()
-
-                    # Store Discriminator metrics.
-                    self.holder.store_variable("gan/d_loss", d_loss)
-                    self.holder.store_variable("gan/disc_grad", disc_grad)
-                    self.holder.store_variable("gan/real_acc", real_acc)
-                    self.holder.store_variable("gan/fake_acc", fake_acc)
-                
                 # False measurement since we do not wait for GPU to finish?
+                # Should use `torch.cuda.synchronize()`
                 t2 = time.time()
                 imgs_per_sec = self.batch_size / (t2 - t1)
                 self.holder.store_variable("util/imgs_per_sec", imgs_per_sec)
@@ -290,12 +353,7 @@ class VQGANTrainer:
                 if (adjusted_step + 1) % self.log_interval == 0:
                     for key in self.holder.metrics.keys():
                         metric = self.holder.compute_metric(key)
-                        if "gan" in key:
-                            disc_step = adjusted_step - self.disc_start
-                            self.logger.log_metric(key, metric, step=disc_step)
-                        else:
-                            self.logger.log_metric(key, metric, step=adjusted_step)
-
+                        self.logger.log_metric(key, metric, step=adjusted_step)
 
             # Evaluation Part.
             self.to_train(False)
@@ -305,9 +363,9 @@ class VQGANTrainer:
 
             for step, x in tqdm(enumerate(self.dev_loader), total=len(self.dev_loader), desc=f"Dev {epoch}", ncols=100):
                 with torch.no_grad():
-                    x = x.to(self.device)
 
                     # Forward pass.
+                    x = x.to(self.device)
                     z = self.encoder(x)
                     z_q, quant_loss, perplexity = self.codebook(z)
                     x_hat = self.decoder(z_q).clamp(-1.0, 1.0)
@@ -316,13 +374,29 @@ class VQGANTrainer:
                     percept_loss = self.percept_loss(x, x_hat)
                     recon_loss = self.recon_loss(x, x_hat)
 
+                    # Add fake images to calculate FID.
+                    x_hat = (x_hat + 1.0) / 2.0
+                    self.fid.update(x_hat, real=False)
+
+                    # If it's first epoch also add real images.
+                    if self.fid.real_features_num_samples < len(self.dev_loader):
+                        x = (x + 1.0) / 2.0
+                        self.fid.update(x, real=True)
+
+                # Calculate dev metrics.
                 recon_loss_dev += recon_loss.item() / len(self.dev_loader)
                 percept_loss_dev += percept_loss.item() / len(self.dev_loader)
                 perplexity_dev += perplexity / len(self.dev_loader)
 
+            # Calculate FID.
+            fid = self.fid.compute()
+            self.fid.reset()
+
+            # Log all dev metrics.
             self.logger.log_metric("dev/recon_loss", recon_loss_dev, step=epoch)
             self.logger.log_metric("dev/percept_loss", percept_loss_dev, step=epoch)
             self.logger.log_metric("dev/perplexity", perplexity_dev, step=epoch)
+            self.logger.log_metric("dev/FID", fid, step=epoch)
 
             # Store model checkpoint locally.
             checkpoint_name = f"vqvae-epoch-{epoch:02}.pt"

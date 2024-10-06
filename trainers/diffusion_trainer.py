@@ -8,7 +8,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from modules.util import *
 from modules.diffusion_components import *
 
@@ -17,12 +17,13 @@ class DiffusionTrainer:
 
     def __init__(
             self,
-            args,
-            train_set,
-            logger,
-            holder
+            args: dict,
+            train_set: Dataset,
+            logger: BasicLogger,
+            holder: MetricHolder
         ):
         
+        # Set training arguemnts as attributes.
         for k, v in args.items():
             setattr(self, k, v)
         
@@ -40,11 +41,11 @@ class DiffusionTrainer:
         )
         self.unet.to(self.device)
 
-        self.scheduler = CosineScheduler(
+        self.scheduler = Scheduler(
             self.num_steps,
             self.beta_start,
             self.beta_end,
-            self.offset,
+            self.type,
             self.device
         )
 
@@ -78,12 +79,11 @@ class DiffusionTrainer:
         )
     
         # Set up dataloader.
-        self.train_loader = DataLoader(train_set, batch_size=self.batch_size, pin_memory=True, shuffle=True)
+        # `num_workers` should be set to `os.cpu_count()` but somehow it makes the training slower.
+        self.train_loader = DataLoader(train_set, batch_size=self.batch_size, pin_memory=True, shuffle=True, num_workers=0)
         self.logger.log_console(f"Train set has {len(train_set)} items.")
 
-        os.makedirs(self.logs_dir, exist_ok=True)
-        
-        # Load checkpoint
+        # Load model checkpoint.
         if self.checkpoint is not None:
             self.curr_epoch = load_checkpoint(
                 self.checkpoint,
@@ -95,11 +95,16 @@ class DiffusionTrainer:
             self.curr_epoch = 0
             self.logger.log_console("No checkpoint provided. Training from scratch.")
 
+        # Compile the model if specified. Works only on Linux.
+        if self.compile:
+            self.logger.log_console("Model is compiling. This will take a few minutes.")
+            self.unet = torch.compile(self.unet)
+
     def train(self):
+        """Start Unet training!"""
 
         # Start training run.
-        last_epoch = min(self.epochs, self.total_epochs)
-        for epoch in range(self.curr_epoch, last_epoch):
+        for epoch in range(self.curr_epoch, self.epochs):
 
             # Training part.
             epoch_loss = 0.0
@@ -167,13 +172,6 @@ class DiffusionTrainer:
                         self.logger.log_metric(key, metric, step=adjusted_step)
 
             self.logger.log_metric("unet/epoch_loss", epoch_loss, step=epoch)
-
-            # Evaluation Part.
-            # todo: implement diffusion for selected images.
-            # self.unet.eval()
-            # for step, x in tqdm(enumerate(self.dev_loader), total=len(self.dev_loader), desc=f"Dev {epoch}", ncols=100):
-            #     with torch.no_grad():
-            #         pass
 
             # Store model checkpoint locally.
             checkpoint_name = f"unet-epoch-{epoch:02}.pt"

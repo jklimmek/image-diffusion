@@ -8,11 +8,11 @@ from modules.util import *
 
 class DiffusionDataset(Dataset):
 
-    def __init__(self, latents_path, classes_path):
+    def __init__(self, latents_path: str, classes_path: str):
         self.latents = np.load(latents_path)
         self.classes = np.load(classes_path)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int):
         x = self.latents[index]
         y = self.classes[index]
         # Return only place label for now.

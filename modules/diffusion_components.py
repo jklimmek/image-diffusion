@@ -1,5 +1,5 @@
 # Modules :
-# - CosineScheduler ✔️
+# - Scheduler ✔️
 # - TimeEmbedding ✔️
 # - ConvBlock ✔️
 # - MultiHeadAttention ✔️
@@ -16,58 +16,75 @@ import torch.nn.functional as F
 
 
 __all__ = [
-    "CosineScheduler",
+    "Scheduler",
     "Unet"
 ]
 
 
-class CosineScheduler:
-    def __init__(self, num_steps, beta_start=0.0001, beta_end=0.02, offset=8e-3, device="cpu"):
+class Scheduler:
+
+    def __init__(
+            self, 
+            num_steps: int, 
+            beta_start: float = 0.0001, 
+            beta_end: float = 0.02, 
+            type: str = "linear", 
+            device: str = "cpu"
+        ):
+
         self.num_steps = num_steps
         self.beta_start = beta_start
         self.beta_end = beta_end
 
-        # timesteps = torch.arange(num_steps + 1, dtype=torch.float32) / num_steps
-        # f = (timesteps + offset) / (1 + offset) * math.pi / 2
-        # f = torch.cos(f).pow(2)
-        # alphas_hat = f / f[0]
-        # betas = 1 - alphas_hat[1:] / alphas_hat[:-1]
-        # self.betas = torch.clip(betas, min=0, max=0.999).to(device)
-        self.betas = (
-                torch.linspace(beta_start ** 0.5, beta_end ** 0.5, num_steps) ** 2
-        ).to(device)
+        if type == "cosine":
+            offset = 8e-3
+            timesteps = torch.arange(num_steps + 1, dtype=torch.float32) / num_steps
+            f = (timesteps + offset) / (1 + offset) * math.pi / 2
+            f = torch.cos(f).pow(2)
+            alphas_hat = f / f[0]
+            betas = 1 - alphas_hat[1:] / alphas_hat[:-1]
+            self.betas = torch.clip(betas, min=0, max=0.999).to(device)
+
+        if type == "linear":
+            self.betas = (
+                    torch.linspace(beta_start ** 0.5, beta_end ** 0.5, num_steps) ** 2
+            ).to(device)
 
         self.alphas = 1. - self.betas
         self.alpha_cum_prod = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_cum_prod = torch.sqrt(self.alpha_cum_prod)
         self.sqrt_one_minus_alpha_cum_prod = torch.sqrt(1 - self.alpha_cum_prod)
         
-    def add_noise(self, x, noise, t):
-        mu = self.sqrt_alpha_cum_prod[t][:, None, None, None]
-        sigma = self.sqrt_one_minus_alpha_cum_prod[t][:, None, None, None]
+    def add_noise(self, x, noise: torch.Tensor, t: torch.Tensor):
+        mu = self.sqrt_alpha_cum_prod[t].view(-1, 1, 1, 1)
+        sigma = self.sqrt_one_minus_alpha_cum_prod[t].view(-1, 1, 1, 1)
         noised = mu * x + sigma * noise
         return noised
     
-    def sample_prev_timestep(self, xt, noise_pred, t):
-        x0 = (xt - (self.sqrt_one_minus_alpha_cum_prod[t] * noise_pred)) / self.sqrt_alpha_cum_prod[t]
+    def sample_prev_timestep(self, xt: torch.Tensor, noise_pred: torch.Tensor, t: torch.Tensor):
+        sqrt_alpha_cum_prod_t = self.sqrt_alpha_cum_prod[t].view(-1, 1, 1, 1)
+        sqrt_one_minus_alpha_cum_prod_t = self.sqrt_one_minus_alpha_cum_prod[t].view(-1, 1, 1, 1)
+        x0 = (xt - (sqrt_one_minus_alpha_cum_prod_t * noise_pred)) / sqrt_alpha_cum_prod_t
         x0 = torch.clamp(x0, -1.0, 1.0)
-        
-        mean = xt - ((self.betas[t]) * noise_pred) / (self.sqrt_one_minus_alpha_cum_prod[t])
-        mean = mean / torch.sqrt(self.alphas[t])
-        
-        if t == 0:
+        betas_t = self.betas[t].view(-1, 1, 1, 1)
+        alphas_t = self.alphas[t].view(-1, 1, 1, 1)
+        mean = xt - (betas_t * noise_pred) / sqrt_one_minus_alpha_cum_prod_t
+        mean = mean / torch.sqrt(alphas_t)
+
+        if t[0] == 0:
             return mean, x0
         else:
-            variance = (1 - self.alpha_cum_prod[t - 1]) / (1.0 - self.alpha_cum_prod[t])
-            variance = variance * self.betas[t]
+            alpha_cum_prod_t_minus_1 = self.alpha_cum_prod[t - 1].view(-1, 1, 1, 1)
+            variance = (1 - alpha_cum_prod_t_minus_1) / (1.0 - self.alpha_cum_prod[t].view(-1, 1, 1, 1))
+            variance = variance * betas_t
             sigma = variance ** 0.5
-            z = torch.randn(xt.shape, device=xt.device)
+            z = torch.randn_like(xt)
             return mean + sigma * z, x0
 
 
 class TimeEmbedding(nn.Module):
 
-    def __init__(self, dim):
+    def __init__(self, dim: int):
         super().__init__()
 
         factor = 10000 ** (torch.arange(0, dim // 2, dtype=torch.float32) / (dim // 2))
@@ -103,7 +120,7 @@ class ConvBlock(nn.Module):
 
 class MultiHeadAttention(nn.Module):
     
-    def __init__(self, in_channels, num_heads, num_groups):
+    def __init__(self, in_channels: int, num_heads: int, num_groups: int):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = in_channels // num_heads
@@ -157,7 +174,7 @@ class MultiHeadAttention(nn.Module):
 
 class Downsample(nn.Module):
 
-    def __init__(self, in_channels):
+    def __init__(self, in_channels: int):
         super().__init__()
         self.down = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
         # Apply padding to keep sizes as pow of 2.
@@ -171,7 +188,7 @@ class Downsample(nn.Module):
 
 class Upsample(nn.Module):
 
-    def __init__(self, in_channels):
+    def __init__(self, in_channels: int):
         super().__init__()
         self.up = nn.Upsample(scale_factor=2)
         self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
@@ -264,15 +281,15 @@ class Unet(nn.Module):
     
     def __init__(
             self,
-            z_dim,
-            channels,
-            mid_channels,
-            change_res,
-            time_dim,
-            num_res_layers,
-            num_heads,
-            num_groups,
-            num_classes
+            z_dim: int,
+            channels: list[int],
+            mid_channels: list[int],
+            change_res: list[bool],
+            time_dim: int,
+            num_res_layers: int,
+            num_heads: int,
+            num_groups: int,
+            num_classes: int
         ):
         super().__init__()
         self.time_dim = time_dim

@@ -14,15 +14,15 @@ cond_drop_prob: 0.1
 num_steps: 1000
 beta_start: 0.0001
 beta_end: 0.02
-offset: 8e-3
+type: linear
 
 # Training.
 learning_rate: 5e-6
 batch_size: 64
-total_epochs: 50
 epochs: 10
 clip_grad: 1.0
 precision: fp32
+compile: false
 
 # Util.
 train_set: ./data/diffusion/train.npy
