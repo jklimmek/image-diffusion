@@ -9,11 +9,11 @@ from modules.util import *
 
 class VQDataset(Dataset):
 
-    def __init__(self, path, transforms=None):
+    def __init__(self, path: str, transforms: Compose = None):
         self.data = np.load(path)
         self.transforms = transforms
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int):
         img = self.data[index]
         if self.transforms:
             img = self.transforms(img)

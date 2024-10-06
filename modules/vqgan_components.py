@@ -137,9 +137,9 @@ class Encoder(nn.Module):
         layers = [nn.Conv2d(in_channels, channels[0], kernel_size=3, padding=1)]
 
         # Down.
-        for i, c in enumerate(channels):
-            c_in = channels[i - 1] if i > 0 else c
-            c_out = c
+        for i, _ in enumerate(channels[:-1]):
+            c_in = channels[i]
+            c_out = channels[i + 1]
             
             # Residuals.
             for _ in range(num_res_blocks):
@@ -201,9 +201,9 @@ class Decoder(nn.Module):
             layers.append(Residual(channels[0], channels[0], num_groups))
 
         # Up.
-        for i, c in enumerate(channels):
-            c_in = channels[i - 1] if i > 0 else c
-            c_out = c
+        for i, _ in enumerate(channels[:-1]):
+            c_in = channels[i]
+            c_out = channels[i + 1]
             
             # Residuals.
             for _ in range(num_res_blocks):
@@ -232,77 +232,6 @@ class Decoder(nn.Module):
         x = self.up(x)
         return x
 
-# class Decoder(nn.Module):
-
-#     def __init__(
-#             self,
-#             out_channels: int,
-#             channels: list[int],
-#             z_dim: int,
-#             num_res_blocks: int,
-#             attn_resolutions: list[int],
-#             init_resolution: int,
-#             num_groups: int
-#         ):
-#         super().__init__()
-
-#         self.up = nn.ModuleList()
-#         curr_res = init_resolution
-
-#         # Bottleneck.
-#         self.up.append(nn.Conv2d(z_dim, z_dim, kernel_size=1))
-#         self.up.append(nn.Conv2d(z_dim, channels[0], kernel_size=3, padding=1))
-#         for _ in range(num_res_blocks):
-#             self.up.append(Residual(channels[0], channels[0], num_groups))
-#         self.up.append(Attention(channels[0], num_groups))
-#         for _ in range(num_res_blocks):
-#             self.up.append(Residual(channels[0], channels[0], num_groups))
-
-#         # Up.
-#         for i, c in enumerate(channels):
-#             c_in = channels[i - 1] if i > 0 else c
-#             c_out = c
-            
-#             # Residuals.
-#             for _ in range(num_res_blocks):
-#                 self.up.append(Residual(c_in, c_out, num_groups))
-#                 c_in = c_out
-
-#             # Attention if needed.
-#             if curr_res in attn_resolutions:
-#                 self.up.append(Attention(c_out, num_groups))
-
-#             # Double the size.
-#             self.up.append(Upsample(c_out))
-#             curr_res *= 2
-        
-#         # Final residual blocks after upsampling
-#         for _ in range(num_res_blocks):
-#             self.up.append(Residual(channels[-1], channels[-1], num_groups))
-
-#         self.up.append(nn.GroupNorm(num_groups, channels[-1]))
-#         self.up.append(nn.SiLU())
-#         self.up.append(nn.Conv2d(channels[-1], out_channels, kernel_size=3, padding=1))
-
-#     def forward(self, x):
-#         for i, layer in enumerate(self.up):
-#             print(f"{i} : {x.std():4f} {x.min():4f} {x.max():4f}")
-#             inf = x.detach().clone()
-
-#             if torch.isnan(x).any():
-#                 print("TOTAL LAYERS :", len(self.up))
-#                 print(f"NaN detected after layer {i}: {layer}")
-#                 # Optionally, apply a clamp to resolve NaNs temporarily (for debugging)
-#                 import code; code.interact(local=locals())
-#                 x = torch.clamp(x, min=-1e6, max=1e6)
-                
-#                 # Log the NaN issue for debugging
-#                 raise  # stop forward pass when NaN is detected
-            
-#             x = layer(x)
-                
-#         return x
-    
 
 class Codebook(nn.Module):
 
@@ -355,7 +284,7 @@ class Codebook(nn.Module):
             
             self.embeddings.weight = nn.Parameter(self.ema_w / self.ema_cluster_size.unsqueeze(1))
 
-        # Calculate losses
+        # Calculate losses.
         commitment_loss = F.mse_loss(quant_out.detach(), quant_in)
         quant_loss = self.beta * commitment_loss
 
@@ -366,6 +295,8 @@ class Codebook(nn.Module):
         quant_out = einops.rearrange(quant_out, "(B H W) C -> B C H W", H=H, W=W)
 
         # Calculate perplexity.
+        # Perplexity is tied to batch size, 
+        # so it is not an ideal way of measuring codebook usage.
         one_hot = F.one_hot(indices, num_classes=self.size).float()
         avg_probs = one_hot.mean(dim=0)
         perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-6))).item()
@@ -374,6 +305,7 @@ class Codebook(nn.Module):
     
 
 class Discriminator(nn.Module):
+    
     def __init__(self, in_channels: int, channels: list[int]):
         super().__init__()
         self.in_channels = in_channels

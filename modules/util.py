@@ -52,11 +52,12 @@ class BasicLogger:
 
 class MetricHolder:
 
-    def __init__(self, buff_size):
+    def __init__(self, buff_size: int):
         self.buff_size = buff_size
         self.metrics = dict()
 
     def store_variable(self, name, val):
+        """Store value in deque."""
         if name not in self.metrics.keys():
             self.metrics[name] = deque(maxlen=self.buff_size)
         if isinstance(val, torch.Tensor):
@@ -64,6 +65,7 @@ class MetricHolder:
         self.metrics[name].append(val)
 
     def compute_metric(self, name):
+        """Compute average from given metric and clear deque."""
         val = np.mean(self.metrics[name])
         self.metrics[name].clear()
         return val
@@ -87,7 +89,11 @@ def load_checkpoint(path, **kwargs):
     checkpoint = torch.load(path)
     for name, obj in kwargs.items():
         if name in checkpoint:
-            obj.load_state_dict(checkpoint[name])
+            state_dict = checkpoint[name]
+            # Handle the `_orig_mod.` prefix.
+            # It is created when using `torch.compile` method.
+            state_dict = {key.replace('_orig_mod.', ''): value for key, value in state_dict.items()}
+            obj.load_state_dict(state_dict)
     
     epoch = checkpoint["epoch"]
     return epoch
