@@ -22,13 +22,13 @@ warnings.filterwarnings("ignore", category=UserWarning, message=".*Arguments oth
 warnings.filterwarnings("ignore", category=UserWarning, message=".*pretrained.*")
 
 
-# Reconstruction loss
+# Reconstruction loss.
 def recon_loss(real: torch.Tensor, fake: torch.Tensor):
     r_loss = F.mse_loss(fake, real) + F.l1_loss(fake, real)
     return r_loss 
 
 
-# Hinge losses
+# Hinge losses.
 def hinge_d_loss(fake: torch.Tensor, real: torch.Tensor):
     loss_fake = torch.mean(F.relu(1.0 + fake))
     loss_real = torch.mean(F.relu(1.0 - real))
