@@ -134,6 +134,7 @@ class DiffusionTrainer:
                     context_mask = (c_prob > self.cond_drop_prob).unsqueeze(1)
 
                 # Forward pass.
+                self.optim.zero_grad()
                 with self.ctx:
                     noise_hat = self.unet(x_noise, t, context=c, context_mask=context_mask)
                     loss = self.criterion(noise_hat, noise)
@@ -153,7 +154,6 @@ class DiffusionTrainer:
                 # Update params, scaler step and zero grad.
                 self.scaler.step(self.optim)
                 self.scaler.update()
-                self.optim.zero_grad()
 
                 # Other stuff.
                 t2 = time.time()
