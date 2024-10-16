@@ -1,7 +1,7 @@
 # image-diffusion
 My implementation of diffusion model trained to generate landscapes.
 
-# The Dataset
+## The Dataset
 The dataset used was [LHQ (Landscapes High-Quality)](https://paperswithcode.com/dataset/lhq) with 90,000 landscapes. Due to computational restrictions (Google Colab's free T4) the picturees were resized to 128x128 resolution. 
 
 ## The Model
