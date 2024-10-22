@@ -56,7 +56,7 @@ class DiffusionTrainer:
         self.criterion = nn.MSELoss()
 
         # Set up optimizer.
-        self.optim = optim.Adam(self.unet.parameters(), lr=self.learning_rate)
+        self.optim = optim.Adam(self.unet.parameters())
 
         # Log number of trainable params.
         num_params = lambda model: sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -116,6 +116,16 @@ class DiffusionTrainer:
                 adjusted_step = epoch * len(self.train_loader) + step
                 t1 = time.time()
 
+                # Learning rate warm-up schedule.
+                if adjusted_step < self.warmup_steps:
+                    lr = self.min_lr + (self.max_lr - self.min_lr) * (adjusted_step / self.warmup_steps)
+                else:
+                    lr = self.max_lr
+
+                # Update the learning rate.
+                for param_group in self.optim.param_groups:
+                    param_group['lr'] = lr
+
                 # Move data to device.
                 x = x.to(self.device)
                 c = c.to(self.device).long()
@@ -164,6 +174,7 @@ class DiffusionTrainer:
                 self.holder.store_variable("unet/loss", loss)
                 self.holder.store_variable("unet/grad", grad)
                 self.holder.store_variable("unet/samples_per_sec", samples_per_sec)
+                self.holder.store_variable("unet/lr", lr)
 
                 # Log metrics to MLflow.
                 if (adjusted_step + 1) % self.log_interval == 0:
