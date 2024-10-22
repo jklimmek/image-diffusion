@@ -28,20 +28,20 @@ def parse_args():
 
     # Common arguments.
     parser.add_argument("type", choices=["vqgan", "diffusion"], help="Choose what dataset to create.")
-    parser.add_argument("--out", default="./", help="Where to output created dataset.")
+    parser.add_argument("--out", type=str, default="./", help="Where to output created dataset.")
 
     # VQGAN dataset arguments.
-    parser.add_argument("--vqgan-images", help="Path to folder with images.")
-    parser.add_argument("--image-size", default=128, help="Resize images to specified value.")
+    parser.add_argument("--vqgan-images", type=str, help="Path to folder with images.")
+    parser.add_argument("--image-size", type=int, default=128, help="Resize images to specified value.")
 
     # Diffusion dataset arguments.
-    parser.add_argument("--diffusion-images", help="Path to .npy file with resized images in range of [0, 255].")
-    parser.add_argument("--vqgan-checkpoint", help="VQGAN checkpoint to compress images to latent space.")
-    parser.add_argument("--config", help="Config for the VQGAN checkpoint to deduce model architecture.")
-    parser.add_argument("--latent-size", help="Compressed images size.") # Could also be deduced by dummy input but eh.
-    parser.add_argument("--clip", default=None, help="Path to OpenAI's CLIP model. If not specified model will be downloaded from the hub.")
-    parser.add_argument("--batch-size", default=32, help="CLIP is a big model so to keep things efficient process data in batches.")
-    parser.add_argument("--classes", default="a coast,a desert,a forest,a sky,a mountain,a body of water,a grassland", help="String with classes separated by a `,` to split the data into using CLIP")
+    parser.add_argument("--diffusion-images", type=str, help="Path to .npy file with resized images in range of [0, 255].")
+    parser.add_argument("--vqgan-checkpoint", type=str, help="VQGAN checkpoint to compress images to latent space.")
+    parser.add_argument("--config", type=str, help="Config for the VQGAN checkpoint to deduce model architecture.")
+    parser.add_argument("--latent-size", type=int, help="Compressed images size.") # Could also be deduced by dummy input but eh.
+    parser.add_argument("--clip", type=str, default=None, help="Path to OpenAI's CLIP model. If not specified model will be downloaded from the hub.")
+    parser.add_argument("--batch-size", type=int, default=32, help="CLIP is a big model so to keep things efficient process data in batches.")
+    parser.add_argument("--classes", type=str, default="a coast,a desert,a forest,a sky,a mountain,a body of water,a grassland", help="String with classes separated by a `,` to split the data into using CLIP")
 
     args = parser.parse_args()
     args = vars(args)
@@ -50,15 +50,15 @@ def parse_args():
 
 def vqgan_dataset(args):
     """Creates dataset for VQGAN model."""
-    names = [file for file in os.listdir(args["vqgan_images"]) if file.endswith(".png")]
+    names = [file for file in os.listdir(args["vqgan_images"]) if file.endswith(('.jpg', '.png'))]
     logging.info(f"Creating VQGAN dataset. Found {len(names)} files.")
 
     # Allocate memory for a buffer for resized images.
     # Creating dataset as one .npy object speeds up loading images and thus training in Google Colab,
     # since CPU has only 2 cores, and so generator functions work waaay slower that usuall.
     buffer = np.zeros((len(names), args["image_size"], args["image_size"], 3), dtype=np.uint8)
-    memory = np.prod(buffer.shape) / (1024**3)
-    logging.info(f"Buffer requires {memory:,.2f}GB of memory.")
+    memory = np.prod(buffer.shape, dtype=np.int64) / (1024**3)
+    logging.info(f"Buffer requires ~{memory:,.2f}GB of memory.")
 
     # Load image one by one, convert to RGB resize and place in the buffer.
     for i, name in tqdm(enumerate(names), total=len(names), ncols=100):
@@ -89,8 +89,8 @@ def diffusion_dataset(args):
     # This is becouse the model was simply not powerful enough 
     # to produce meaningful images with two sources of information.
     labels = np.zeros((images.shape[0], 2), dtype=np.uint8)
-    memory = 2 * np.prod(buffer.shape) / (1024**2)
-    logging.info(f"Buffer requires {memory:,.2f}MB of memory.")
+    memory = 2 * np.prod(buffer.shape, dtype=np.int64) / (1024**2)
+    logging.info(f"Buffer requires ~{memory:,.2f}MB of memory.")
 
     # Set up VQGAN model.
     cfg = parse_config(args["config"])
