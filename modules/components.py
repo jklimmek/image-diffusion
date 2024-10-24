@@ -1,26 +1,23 @@
 # Modules :
 # - Residual ✔️
-# - Attention ✔️
+# - MultiHeadAttention ✔️
 # - Downsample ✔️
 # - Upsample ✔️
 # - Encoder ✔️
 # - Decoder ✔️
 # - Codebook ✔️
 # - Discriminator ✔️
+# - Scheduler ✔️
+# - TimeEmbedding ✔️
+# - ConvBlock ✔️
+# - DiffusionBlock ✔️
+# - Unet ✔️
 
 import math
 import einops
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-__all__ = [
-    "Encoder",
-    "Decoder",
-    "Codebook",
-    "Discriminator"
-]
 
 
 class Residual(nn.Module):
@@ -49,48 +46,59 @@ class Residual(nn.Module):
         return x
 
 
-class Attention(nn.Module):
-
-    def __init__(self, in_channels: int, num_groups: int):
+class MultiHeadAttention(nn.Module):
+    
+    def __init__(self, in_channels: int, num_heads: int, num_groups: int):
         super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = in_channels // num_heads
         self.groupnorm = nn.GroupNorm(num_groups, in_channels)
-        self.to_q = nn.Conv2d(in_channels, in_channels, kernel_size=1, padding=0)
-        self.to_k = nn.Conv2d(in_channels, in_channels, kernel_size=1, padding=0)
-        self.to_v = nn.Conv2d(in_channels, in_channels, kernel_size=1, padding=0)
-        self.out_proj = nn.Conv2d(in_channels, in_channels, kernel_size=1, padding=0)
-
-    def forward(self, x):
-        _, C, H, W = x.shape
+        self.to_q = nn.Linear(in_channels, in_channels)
+        self.to_k = nn.Linear(in_channels, in_channels)
+        self.to_v = nn.Linear(in_channels, in_channels)
+        self.out_proj = nn.Linear(in_channels, in_channels)
+    
+    def forward(self, q, k=None, v=None):
+        _, _, H, W = q.shape
 
         # Residual connection lets gradients flow during early stage of training.
-        resid = x
+        resid = q
 
         # Groupnorm before attention for stability.
-        x = self.groupnorm(x)
+        q = self.groupnorm(q)
+
+        # Merge heigth and width, swap channels to be last.
+        q = einops.rearrange(q, "b c h w -> b (h w) c")
+
+        # Assume self-attention.
+        if k is None or v is None:
+            k = v = q
 
         # Project input into proper vectors. 
-        q = self.to_q(x)
-        k = self.to_k(x)
-        v = self.to_v(x)
+        q = self.to_q(q)
+        k = self.to_k(k)
+        v = self.to_v(v)
 
-        # Merge heigth and width and swap channels to be last.
-        q = einops.rearrange(q, "b c h w -> b (h w) c")
-        k = einops.rearrange(k, "b c h w -> b (h w) c")
-        v = einops.rearrange(v, "b c h w -> b (h w) c")
+        # Split into num_heads.
+        q = einops.rearrange(q, "b n (h c) -> b h n c", h=self.num_heads)
+        k = einops.rearrange(k, "b n (h c) -> b h n c", h=self.num_heads)
+        v = einops.rearrange(v, "b n (h c) -> b h n c", h=self.num_heads)
 
-        # Calculate attention.
-        weights = einops.einsum(q, k, "b t1 c, b t2 c -> b t1 t2") / math.sqrt(C)
+        # Calculate attention and merge heads.
+        weights = einops.einsum(q, k, "b h n1 c, b h n2 c -> b h n1 n2") / math.sqrt(self.head_dim)
         scores = torch.softmax(weights, dim=-1)
-        attention = einops.einsum(scores, v, "b t1 t2, b t2 c -> b t1 c")
+        attention = einops.einsum(scores, v, "b h t1 t2, b h t2 c -> b h t1 c")
+        attention = einops.rearrange(attention, "b h t c -> b t (h c)")
 
-        # Reshape to the initial 2D shape.
-        out_2d = einops.rearrange(attention, "b (h w) c -> b c h w", h=H, w=W)
+        # Apply output projection.
+        out_proj = self.out_proj(attention)
 
-        # Apply output projection and add residue.
-        out_2d = self.out_proj(out_2d)
+        # Reshape to the initial 2D shape and add residue.
+        out_2d = einops.rearrange(out_proj, "b (h w) c -> b c h w", h=H, w=W)
         out = out_2d + resid
-        return out
 
+        return out
+    
 
 class Downsample(nn.Module):
 
@@ -128,6 +136,7 @@ class Encoder(nn.Module):
             z_dim: int,
             num_res_blocks: int,
             attn_resolutions: list[int],
+            num_heads: int,
             init_resolution: int,
             num_groups: int
         ):
@@ -148,7 +157,7 @@ class Encoder(nn.Module):
 
             # Attention if needed.
             if curr_res in attn_resolutions:
-                layers.append(Attention(c_out, num_groups))
+                layers.append(MultiHeadAttention(c_out, num_heads, num_groups))
 
             # Half the size.
             layers.append(Downsample(c_out))
@@ -157,7 +166,7 @@ class Encoder(nn.Module):
         # Bottleneck.
         for _ in range(num_res_blocks):
             layers.append(Residual(channels[-1], channels[-1], num_groups))
-        layers.append(Attention(channels[-1], num_groups))
+        layers.append(MultiHeadAttention(channels[-1], num_heads, num_groups))
         for _ in range(num_res_blocks):
             layers.append(Residual(channels[-1], channels[-1], num_groups))
 
@@ -182,6 +191,7 @@ class Decoder(nn.Module):
             z_dim: int,
             num_res_blocks: int,
             attn_resolutions: list[int],
+            num_heads: int,
             init_resolution: int,
             num_groups: int
         ):
@@ -196,7 +206,7 @@ class Decoder(nn.Module):
         ]
         for _ in range(num_res_blocks):
             layers.append(Residual(channels[0], channels[0], num_groups))
-        layers.append(Attention(channels[0], num_groups))
+        layers.append(MultiHeadAttention(channels[0], num_heads, num_groups))
         for _ in range(num_res_blocks):
             layers.append(Residual(channels[0], channels[0], num_groups))
 
@@ -212,7 +222,7 @@ class Decoder(nn.Module):
 
             # Attention if needed.
             if curr_res in attn_resolutions:
-                layers.append(Attention(c_out, num_groups))
+                layers.append(MultiHeadAttention(c_out, num_heads, num_groups))
 
             # Double the size.
             layers.append(Upsample(c_out))
@@ -348,3 +358,179 @@ class Discriminator(nn.Module):
         elif classname.find('BatchNorm2d') != -1:
             nn.init.normal_(m.weight.data, 1.0, init_gain)
             nn.init.constant_(m.bias.data, 0.0)
+
+
+class Scheduler:
+
+    def __init__(
+            self, 
+            num_steps: int, 
+            beta_start: float = 0.0001, 
+            beta_end: float = 0.02, 
+            type: str = "linear", 
+            device: str = "cpu"
+        ):
+
+        self.num_steps = num_steps
+        self.beta_start = beta_start
+        self.beta_end = beta_end
+
+        if type == "cosine":
+            offset = 8e-3
+            timesteps = torch.arange(num_steps + 1, dtype=torch.float32) / num_steps
+            f = (timesteps + offset) / (1 + offset) * math.pi / 2
+            f = torch.cos(f).pow(2)
+            alphas_hat = f / f[0]
+            betas = 1 - alphas_hat[1:] / alphas_hat[:-1]
+            self.betas = torch.clip(betas, min=0, max=0.999).to(device)
+
+        if type == "linear":
+            self.betas = (
+                    torch.linspace(beta_start ** 0.5, beta_end ** 0.5, num_steps) ** 2
+            ).to(device)
+
+        self.alphas = 1. - self.betas
+        self.alpha_cum_prod = torch.cumprod(self.alphas, dim=0)
+        self.sqrt_alpha_cum_prod = torch.sqrt(self.alpha_cum_prod)
+        self.sqrt_one_minus_alpha_cum_prod = torch.sqrt(1 - self.alpha_cum_prod)
+        
+    def add_noise(self, x, noise: torch.Tensor, t: torch.Tensor):
+        mu = self.sqrt_alpha_cum_prod[t].view(-1, 1, 1, 1)
+        sigma = self.sqrt_one_minus_alpha_cum_prod[t].view(-1, 1, 1, 1)
+        noised = mu * x + sigma * noise
+        return noised
+    
+    def sample_prev_timestep(self, xt: torch.Tensor, noise_pred: torch.Tensor, t: torch.Tensor):
+        sqrt_alpha_cum_prod_t = self.sqrt_alpha_cum_prod[t].view(-1, 1, 1, 1)
+        sqrt_one_minus_alpha_cum_prod_t = self.sqrt_one_minus_alpha_cum_prod[t].view(-1, 1, 1, 1)
+        x0 = (xt - (sqrt_one_minus_alpha_cum_prod_t * noise_pred)) / sqrt_alpha_cum_prod_t
+        x0 = torch.clamp(x0, -1.0, 1.0)
+        betas_t = self.betas[t].view(-1, 1, 1, 1)
+        alphas_t = self.alphas[t].view(-1, 1, 1, 1)
+        mean = xt - (betas_t * noise_pred) / sqrt_one_minus_alpha_cum_prod_t
+        mean = mean / torch.sqrt(alphas_t)
+
+        if t[0] == 0:
+            return mean, x0
+        else:
+            alpha_cum_prod_t_minus_1 = self.alpha_cum_prod[t - 1].view(-1, 1, 1, 1)
+            variance = (1 - alpha_cum_prod_t_minus_1) / (1.0 - self.alpha_cum_prod[t].view(-1, 1, 1, 1))
+            variance = variance * betas_t
+            sigma = variance ** 0.5
+            z = torch.randn_like(xt)
+            return mean + sigma * z, x0
+
+
+class TimeEmbedding(nn.Module):
+
+    def __init__(self, dim: int):
+        super().__init__()
+
+        factor = 10000 ** (torch.arange(0, dim // 2, dtype=torch.float32) / (dim // 2))
+        self.register_buffer('factor', factor)
+
+        self.embeddings = nn.Sequential(
+            nn.Linear(dim, 4*dim),
+            nn.SiLU(),
+            nn.Linear(4*dim, dim)
+        )
+
+    def forward(self, x):
+        x = x[:, None] / self.factor
+        x = torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+        x = self.embeddings(x)
+        return x
+    
+
+class ConvBlock(nn.Module):
+
+    def __init__(self, in_channels: int, out_channels: int, num_groups: int):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.GroupNorm(num_groups, in_channels),
+            nn.SiLU(),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        )
+
+    def forward(self, x):
+        x = self.layers(x)
+        return x
+    
+
+class DiffusionBlock(nn.Module):
+
+    def __init__(
+            self, 
+            in_channels: int, 
+            out_channels: int, 
+            time_dim: int,
+            num_layers: int, 
+            num_heads: int, 
+            num_groups: int,
+        ):
+        super().__init__()
+        self.num_layers = num_layers
+        self.first_halfs = nn.ModuleList(
+            [
+                ConvBlock(in_channels if i == 0 else out_channels, out_channels, num_groups)
+                for i in range(num_layers)
+            ]
+        )
+
+        self.time_projs = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.SiLU(),
+                    nn.Linear(time_dim, out_channels)
+                ) for _ in range(num_layers)
+            ]
+        )
+
+        self.second_halfs = nn.ModuleList(
+            [
+                ConvBlock(out_channels, out_channels, num_groups)
+                for _ in range(num_layers)
+            ]
+        )
+
+        self.residuals = nn.ModuleList(
+            [
+                nn.Conv2d(in_channels if i == 0 else out_channels, out_channels, kernel_size=1)
+                for i in range(num_layers)
+            ]
+        )
+
+        self.self_attns = nn.ModuleList(
+            [
+                MultiHeadAttention(out_channels, num_heads, num_groups)
+                for _ in range(num_layers)
+            ]
+        )
+
+    def forward(self, x, timestep, out_down=None):
+        
+        if out_down is not None:
+            x = torch.cat((x, out_down), dim=1)
+
+        for i in range(self.num_layers):
+
+            resid = x
+
+            # First half.
+            x = self.first_halfs[i](x)
+
+            # Time embedding.
+            t = self.time_projs[i](timestep)[:, :, None, None]
+            x = x + t
+
+            # Second half.
+            x = self.second_halfs[i](x)
+
+            # Residual.
+            x = x + self.residuals[i](resid)
+
+            # Self-attention.
+            x = self.self_attns[i](x)
+        
+        return x
+    

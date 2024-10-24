@@ -3,14 +3,16 @@ import numpy  as np
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import Compose, Normalize
-from trainers.vqgan_trainer import VQGANTrainer
+from trainers.vae_trainer import VAETrainer
+from modules.components import Discriminator
+from modules.vae import VAE
 from modules.util import *
 
 
 class VQDataset(Dataset):
 
     def __init__(self, path: str, transforms: Compose = None):
-        self.data = np.load(path)
+        self.data = np.load(path)[:64]
         self.transforms = transforms
 
     def __getitem__(self, index: int):
@@ -51,7 +53,7 @@ def parse_args():
     if args["experiment_name"] is not None:
         run_name = args["experiment_name"]
     else:
-        run_name = get_run_name("vqgan")
+        run_name = get_run_name("vae")
     args["run_name"] = run_name
     return args
 
@@ -72,13 +74,36 @@ def main():
     seed_everything(args["seed"], args["epochs"])
 
     # Set up training components.
+    vae = VAE(
+        args["in_channels"],
+        args["channels"],
+        args["z_dim"],
+        args["bottleneck"],
+        args["codebook_size"],
+        args["codebook_beta"],
+        args["codebook_gamma"],
+        args["enc_num_res_blocks"],
+        args["dec_num_res_blocks"],
+        args["attn_resolutions"],
+        args["num_heads"],
+        args["init_resolution"],
+        args["num_groups"]
+    )
+
+    disc = Discriminator(
+        args["in_channels"],
+        args["disc_channels"]
+    )
+
     train_ds = VQDataset(args["train_set"], transforms=transforms)
     dev_ds = VQDataset(args["dev_set"], transforms=transforms)
     logger = BasicLogger(args["logs_dir"], args["run_name"], args["no_mlflow"], args["log_interval"])
     holder = MetricHolder(args["log_interval"])
     
-    trainer = VQGANTrainer(
+    trainer = VAETrainer(
         args,
+        vae, 
+        disc,
         train_ds,
         dev_ds,
         logger,
