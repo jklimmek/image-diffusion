@@ -9,10 +9,10 @@ from modules.vae import VAE
 from modules.util import *
 
 
-class VQDataset(Dataset):
+class VAEDataset(Dataset):
 
     def __init__(self, path: str, transforms: Compose = None):
-        self.data = np.load(path)[:64]
+        self.data = np.load(path)[:1000]
         self.transforms = transforms
 
     def __getitem__(self, index: int):
@@ -95,8 +95,8 @@ def main():
         args["disc_channels"]
     )
 
-    train_ds = VQDataset(args["train_set"], transforms=transforms)
-    dev_ds = VQDataset(args["dev_set"], transforms=transforms)
+    train_ds = VAEDataset(args["train_set"], transforms=transforms)
+    dev_ds = VAEDataset(args["dev_set"], transforms=transforms)
     logger = BasicLogger(args["logs_dir"], args["run_name"], args["no_mlflow"], args["log_interval"])
     holder = MetricHolder(args["log_interval"])
     

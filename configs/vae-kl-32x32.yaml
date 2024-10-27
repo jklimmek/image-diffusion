@@ -1,4 +1,4 @@
-# Architecture.
+# Architecture
 in_channels: 3
 channels: [32, 32, 64, 128] #[64, 128, 256]
 enc_num_res_blocks: 2
@@ -6,33 +6,34 @@ dec_num_res_blocks: 2
 attn_resolutions: [] # if empty, attention only in bottleneck
 num_heads: 8
 bottleneck: kl # vq
-prior_weight: 0.0001
-codebook_size: null
-codebook_beta: null
-codebook_gamma: null
+codebook_size: 1024
+codebook_beta: 0.25
+codebook_gamma: 0.99
 disc_channels: [32, 64, 128] #[64, 128, 512]
 z_dim: 4
 init_resolution: 256
 num_groups: 32
 
-# Training.
+# Training
 recon_weight: 1.0
 percept_weight: 1.0
-quant_weight: 1.0
+prior_weight: 0.000001
 disc_weight: 0.1
-disc_start: 10
+disc_start: 10000
 gan_loss: "mse" # "bce", "mse" or "hinge"
 learning_rate: 1e-5
-batch_size: 4
+warmup_steps: 0
+batch_size: 2
+accumulation_steps: 2
 epochs: 9
 clip_grad: 1.0
 precision: fp32
 compile: false
 
-# Util.
+# Util
 train_set: ./data/vae/vae_dev.npy
 dev_set: ./data/vae/vae_dev.npy
-plot_set: ./data/vae/plot.npy
+plot_set: ./data/vae/vae_plot.npy
 checkpoints_dir: ./checkpoints
 logs_dir: ./logs
 seed: 2018

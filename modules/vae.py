@@ -8,19 +8,19 @@ class VAE(nn.Module):
 
     def __init__(
             self, 
-            in_channels,
-            channels,
-            z_dim,
-            bottleneck,
-            codebook_size,
-            codebook_beta,
-            codebook_gamma,
-            enc_num_res_blocks,
-            dec_num_res_blocks,
-            attn_resolutions,
-            num_heads,
-            init_resolution,
-            num_groups
+            in_channels: int,
+            channels: list[int],
+            z_dim: int,
+            bottleneck: str,
+            codebook_size: int,
+            codebook_beta: float,
+            codebook_gamma: float,
+            enc_num_res_blocks: int,
+            dec_num_res_blocks: int,
+            attn_resolutions: list[int],
+            num_heads: int,
+            init_resolution: int,
+            num_groups: int
         ):
 
         super().__init__()
@@ -81,6 +81,7 @@ class VAE(nn.Module):
         
         elif self.bottleneck == "kl":
             mean, log_var = torch.chunk(z, chunks=2, dim=1)
+            log_var = torch.clamp(log_var, -30.0, 20.0)
             # Calculate the KL loss.
             kl_loss = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp(), dim=[1, 2, 3])
             # Reparametrization trick.
@@ -89,9 +90,13 @@ class VAE(nn.Module):
                 noise = torch.randn_like(mean, device=z.device)
                 z = mean + noise * std
                 # For convenience, return dummy output aswell.
-            return z, kl_loss.mean(), None
+            return z, kl_loss.mean(), 0.0
 
-    def decode(self, z):
+    def decode(self, z, quantize=False):
+        if self.bottleneck == "kl" and quantize:
+            raise ValueError("Cannot quantize in the KL model!")
+        if quantize:
+            z, _, _ = self.codebook(z)
         x_hat = self.decoder(z)
         return x_hat
     

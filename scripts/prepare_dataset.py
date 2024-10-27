@@ -10,7 +10,7 @@ from tqdm import tqdm
 from torchvision.transforms import CenterCrop, Compose, InterpolationMode, Normalize, Resize, ToPILImage, ToTensor
 
 from modules.util import load_checkpoint, parse_config
-from modules.vqgan_components import Codebook, Encoder
+from modules.components import Codebook, Encoder
 
 
 # Set up console logging.
@@ -27,17 +27,17 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     # Common arguments.
-    parser.add_argument("type", choices=["vqgan", "diffusion"], help="Choose what dataset to create.")
+    parser.add_argument("type", choices=["vae", "diffusion"], help="Choose what dataset to create.")
     parser.add_argument("--out", type=str, default="./", help="Where to output created dataset.")
 
-    # VQGAN dataset arguments.
-    parser.add_argument("--vqgan-images", type=str, help="Path to folder with images.")
+    # VAE dataset arguments.
+    parser.add_argument("--vae-images", type=str, help="Path to folder with images.")
     parser.add_argument("--image-size", type=int, default=128, help="Resize images to specified value.")
 
     # Diffusion dataset arguments.
     parser.add_argument("--diffusion-images", type=str, help="Path to .npy file with resized images in range of [0, 255].")
-    parser.add_argument("--vqgan-checkpoint", type=str, help="VQGAN checkpoint to compress images to latent space.")
-    parser.add_argument("--config", type=str, help="Config for the VQGAN checkpoint to deduce model architecture.")
+    parser.add_argument("--vae-checkpoint", type=str, help="VAE checkpoint to compress images to latent space.")
+    parser.add_argument("--config", type=str, help="Config for the VAE checkpoint to deduce model architecture.")
     parser.add_argument("--latent-size", type=int, help="Compressed images size.") # Could also be deduced by dummy input but eh.
     parser.add_argument("--clip", type=str, default=None, help="Path to OpenAI's CLIP model. If not specified model will be downloaded from the hub.")
     parser.add_argument("--batch-size", type=int, default=32, help="CLIP is a big model so to keep things efficient process data in batches.")
@@ -48,10 +48,10 @@ def parse_args():
     return args
 
 
-def vqgan_dataset(args):
-    """Creates dataset for VQGAN model."""
-    names = [file for file in os.listdir(args["vqgan_images"]) if file.endswith(('.jpg', '.png'))]
-    logging.info(f"Creating VQGAN dataset. Found {len(names)} files.")
+def vae_dataset(args):
+    """Creates dataset for VAE model."""
+    names = [file for file in os.listdir(args["vae_images"]) if file.endswith(('.jpg', '.png'))]
+    logging.info(f"Creating VAE dataset. Found {len(names)} files.")
 
     # Allocate memory for a buffer for resized images.
     # Creating dataset as one .npy object speeds up loading images and thus training in Google Colab,
@@ -62,7 +62,7 @@ def vqgan_dataset(args):
 
     # Load image one by one, convert to RGB resize and place in the buffer.
     for i, name in tqdm(enumerate(names), total=len(names), ncols=100):
-        image_path = os.path.join(args["vqgan_images"], name)
+        image_path = os.path.join(args["vae_images"], name)
         with Image.open(image_path) as image:
             image = image.convert("RGB") if image.mode != "RGB" else image
             image = image.resize((args["image_size"], args["image_size"]))
@@ -70,7 +70,7 @@ def vqgan_dataset(args):
             buffer[i] = image
 
     # Store dataset as .npy file.
-    dataset_path = os.path.join(args["out"], "vqgan_dataset.npy")
+    dataset_path = os.path.join(args["out"], "vae_dataset.npy")
     os.makedirs(args["out"], exist_ok=True)
     np.save(dataset_path, buffer)
     
@@ -82,7 +82,7 @@ def diffusion_dataset(args):
     images = np.load(args["diffusion_images"], mmap_mode="r")
     logging.info(f"Creating Diffusion dataset. Found {images.shape[0]} images.")
 
-    # The same reason as in VQGAN.
+    # The same reason as in VAE.
     buffer = np.zeros((images.shape[0], 3, args["latent_size"], args["latent_size"]), dtype=np.float16)
     # Two Labels represent selected class and temperature (`a cold place` etc.) 
     # but only class label was used in this project.
@@ -92,7 +92,7 @@ def diffusion_dataset(args):
     memory = 2 * np.prod(buffer.shape, dtype=np.int64) / (1024**2)
     logging.info(f"Buffer requires ~{memory:,.2f}MB of memory.")
 
-    # Set up VQGAN model.
+    # Set up VAE model.
     cfg = parse_config(args["config"])
     enc = Encoder(
         cfg["in_channels"], 
@@ -111,7 +111,7 @@ def diffusion_dataset(args):
         cfg["codebook_gamma"]
     )
 
-    load_checkpoint(args["vqgan_checkpoint"], encoder=enc, codebook=codebook)
+    load_checkpoint(args["vae_checkpoint"], encoder=enc, codebook=codebook)
     enc.eval()
     codebook.eval()
     enc.cuda()
@@ -177,8 +177,8 @@ def diffusion_dataset(args):
 
 def main():
     args = parse_args()
-    if args["type"] == "vqgan":
-        vqgan_dataset(args)
+    if args["type"] == "vae":
+        vae_dataset(args)
     elif args["type"] == "diffusion":
         diffusion_dataset(args)
 

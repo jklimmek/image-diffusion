@@ -9,8 +9,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from modules.components import Scheduler
+from modules.unet import Unet
 from modules.util import *
-from modules.diffusion_components import *
 
 
 class DiffusionTrainer:
