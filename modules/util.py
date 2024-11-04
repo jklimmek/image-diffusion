@@ -1,3 +1,7 @@
+# Modules :
+# - BasicLogger ✔️
+# - MetricHolder ✔️
+
 import os
 import re
 import yaml
@@ -51,6 +55,9 @@ class BasicLogger:
 
 
 class MetricHolder:
+    # Unfortunately training in Google Colab slows down substantially
+    # if we log values too often, so this class aggregates past N values 
+    # and returns a mean, so the training is efficient.
 
     def __init__(self, buff_size: int):
         self.buff_size = buff_size
@@ -71,14 +78,15 @@ class MetricHolder:
         return val
     
 
-def save_checkpoint(path, epoch=None, **kwargs):
+def save_checkpoint(path, architecture, epoch=None, **kwargs):
     """Make necessary dirs if needed and save the model checkpoint during training."""
     # Not the greatest idea,
     # since when loading you may not know what keys are in checkpoint.
     param_dict = {
         name: obj.state_dict() if obj else None for name, obj in kwargs.items()
     }
-    param_dict['epoch'] = epoch
+    param_dict["epoch"] = epoch
+    param_dict["architecture"] = architecture
     folder = os.path.dirname(path)
     os.makedirs(folder, exist_ok=True)
     torch.save(param_dict, path)
@@ -92,6 +100,7 @@ def load_checkpoint(path, **kwargs):
             state_dict = checkpoint[name]
             # Handle the `_orig_mod.` prefix.
             # It is created when using `torch.compile` method.
+            # Probably not the greatest workaround but it's enough.
             state_dict = {key.replace('_orig_mod.', ''): value for key, value in state_dict.items()}
             obj.load_state_dict(state_dict)
     

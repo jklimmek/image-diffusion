@@ -19,6 +19,8 @@ class DiffusionTrainer:
     def __init__(
             self,
             args: dict,
+            unet: Unet,
+            scheduler: Scheduler,
             train_set: Dataset,
             logger: BasicLogger,
             holder: MetricHolder
@@ -27,28 +29,24 @@ class DiffusionTrainer:
         # Set training arguemnts as attributes.
         for k, v in args.items():
             setattr(self, k, v)
+
+        # The same case as with VAE.
+        self.architecture = {
+            "z_dim": self.z_dim,
+            "channels": self.channels,
+            "mid_channels": self.mid_channels,
+            "time_dim": self.time_dim,
+            "num_res_layers": self.num_res_layers,
+            "num_heads": self.num_heads,
+            "num_groups": self.num_groups,
+            "num_classes": self.num_classes
+        }
         
         # Set up components.
-        self.unet = Unet(
-            self.z_dim,
-            self.channels,
-            self.mid_channels,
-            self.change_res,
-            self.time_dim,
-            self.num_res_layers,
-            self.num_heads,
-            self.num_groups,
-            self.num_classes
-        )
+        self.unet = unet
         self.unet.to(self.device)
 
-        self.scheduler = Scheduler(
-            self.num_steps,
-            self.beta_start,
-            self.beta_end,
-            self.type,
-            self.device
-        )
+        self.scheduler = scheduler
 
         self.logger = logger
         self.holder = holder
@@ -104,7 +102,19 @@ class DiffusionTrainer:
     def train(self):
         """Start Unet training!"""
 
+        # Log hyperparameteres to MLflow. 
+        self.logger.log_params(
+            lr=self.learning_rate,
+            warmup_steps=self.warmup_steps,
+            cond_drop_prob=self.cond_drop_prob,
+            scheduler=f"{self.noise_type} : [{self.beta_start} - {self.beta_end}] in {self.num_steps} steps"
+        )
+
+        # If latents are from the KL model they need to be transformed before adding noise.
+        sample = True if self.ae_type == "kl" else False
+
         # Start training run.
+        self.optim.zero_grad()
         for epoch in range(self.curr_epoch, self.epochs):
 
             # Training part.
@@ -119,9 +129,10 @@ class DiffusionTrainer:
 
                 # Learning rate warm-up schedule.
                 if adjusted_step < self.warmup_steps:
-                    lr = self.min_lr + (self.max_lr - self.min_lr) * (adjusted_step / self.warmup_steps)
+                    min_lr = self.learning_rate / 100
+                    lr = min_lr + (self.learning_rate - min_lr) * (adjusted_step / self.warmup_steps)
                 else:
-                    lr = self.max_lr
+                    lr = self.learning_rate
 
                 # Update the learning rate.
                 for param_group in self.optim.param_groups:
@@ -130,6 +141,14 @@ class DiffusionTrainer:
                 # Move data to device.
                 x = x.to(self.device)
                 c = c.to(self.device).long()
+
+                # If latents are from KL model, combine mean and log variance into one vector.
+                if sample:
+                    mean, log_var = torch.chunk(x, chunks=2, dim=1)
+                    log_var = torch.clamp(log_var, -30.0, 20.0)
+                    std = torch.exp(0.5 * log_var)
+                    noise = torch.randn_like(mean, device=x.device)
+                    x = mean + noise * std
 
                 with torch.no_grad():
                     
@@ -145,7 +164,6 @@ class DiffusionTrainer:
                     context_mask = (c_prob > self.cond_drop_prob).unsqueeze(1)
 
                 # Forward pass.
-                self.optim.zero_grad()
                 with self.ctx:
                     noise_hat = self.unet(x_noise, t, context=c, context_mask=context_mask)
                     loss = self.criterion(noise_hat, noise)
@@ -165,6 +183,7 @@ class DiffusionTrainer:
                 # Update params, scaler step and zero grad.
                 self.scaler.step(self.optim)
                 self.scaler.update()
+                self.optim.zero_grad()
 
                 # Other stuff.
                 t2 = time.time()
@@ -190,6 +209,7 @@ class DiffusionTrainer:
             checkpoint_path = os.path.join(self.checkpoints_dir, self.run_name, checkpoint_name)
             save_checkpoint(
                 checkpoint_path, 
+                self.architecture,
                 epoch=epoch,
                 unet=self.unet,
                 optim=self.optim

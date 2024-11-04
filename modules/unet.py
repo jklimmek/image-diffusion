@@ -1,4 +1,5 @@
 import einops
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -12,7 +13,6 @@ class Unet(nn.Module):
             z_dim: int,
             channels: list[int],
             mid_channels: list[int],
-            change_res: list[bool],
             time_dim: int,
             num_res_layers: int,
             num_heads: int,
@@ -43,7 +43,7 @@ class Unet(nn.Module):
         )
         self.downsamples = nn.ModuleList(
             [
-                Downsample(channels[i + 1]) if change_res[i] else nn.Identity() for i in range(len(change_res))
+                Downsample(channels[i + 1]) for i in range(len(channels) - 1)
             ]
         )
 
@@ -75,7 +75,7 @@ class Unet(nn.Module):
 
         self.upsamples = nn.ModuleList(
             [
-                Upsample(channels[::-1][i]) if change_res[::-1][i] else nn.Identity() for i in range(len(change_res))
+                Upsample(channels[::-1][i]) for i in range(len(channels) - 1)
             ]
         )
 
@@ -119,3 +119,11 @@ class Unet(nn.Module):
 
         x = self.out_conv(x)
         return x
+    
+    @classmethod
+    def from_checkpoint(cls, path):
+        checkpoint = torch.load(path)
+        model_params = checkpoint["architecture"]
+        model = cls(**model_params)
+        model.load_state_dict(checkpoint["vae"])
+        return model

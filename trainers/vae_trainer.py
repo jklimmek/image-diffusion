@@ -64,13 +64,6 @@ def bce_g_loss(fake: torch.Tensor):
     return g_loss
 
 
-def cycle(data_loader):
-    """Infinitely yields batches from a DataLoader."""
-    while True:
-        for batch in data_loader:
-            yield batch
-
-
 class VAETrainer:
 
     def __init__(
@@ -88,6 +81,23 @@ class VAETrainer:
         for k, v in args.items():
             setattr(self, k, v)
 
+        # It is needed to load VAE checkpoint for inference without knowing it's architecture.
+        self.architecture = {
+            "in_channels": self.in_channels,
+            "channels": self.channels,
+            "z_dim": self.z_dim,
+            "bottleneck": self.bottleneck,
+            "codebook_size": self.codebook_size,
+            "codebook_beta": self.codebook_beta,
+            "codebook_gamma": self.codebook_gamma,
+            "enc_num_res_blocks": self.enc_num_res_blocks,
+            "dec_num_res_blocks": self.dec_num_res_blocks,
+            "attn_resolutions": self.attn_resolutions,
+            "num_heads": self.num_heads,
+            "init_resolution": self.init_resolution,
+            "num_groups": self.num_groups
+        }
+
         # Set up components.
         self.vae = vae 
         self.disc = disc
@@ -103,9 +113,7 @@ class VAETrainer:
         self.d_loss = {"mse": mse_d_loss, "bce": bce_d_loss, "hinge": hinge_d_loss}[self.gan_loss]
         self.g_loss = {"mse": mse_g_loss, "bce": bce_g_loss, "hinge": hinge_g_loss}[self.gan_loss]
         self.percept_loss = LPIPS(net_type="vgg").eval().to(self.device)
-        for param in self.percept_loss.parameters():
-            if param.requires_grad:
-                param.requires_grad_(False)
+        self.percept_loss.requires_grad_(False)
         
         # Set up recunstruction quality metrics.
         self.fid = FID(reset_real_features=False, normalize=True).eval().to(self.device)
@@ -141,14 +149,9 @@ class VAETrainer:
     
         # Set up dataloaders.
         # `num_workers` should be set to `os.cpu_count()` but somehow it makes the training slower.
-        self.train_loader = DataLoader(train_set, batch_size=self.batch_size, pin_memory=True, shuffle=False, num_workers=0)
+        self.train_loader = DataLoader(train_set, batch_size=self.batch_size, pin_memory=True, shuffle=True, num_workers=0)
         self.dev_loader = DataLoader(dev_set, batch_size=self.batch_size, pin_memory=True, shuffle=False, num_workers=0)
         self.logger.log_console(f"Train set has {len(train_set)} items. Dev set has {len(dev_set)} items.")
-        
-        sps = self.batch_size * self.accumulation_steps
-        self.logger.log_console(
-            f"Training with {self.batch_size} * {self.accumulation_steps} = {sps} samples per optimizer step."
-        )
 
         # Load model checkpoint.
         if self.checkpoint is not None:
@@ -170,11 +173,6 @@ class VAETrainer:
             self.vae = torch.compile(self.vae)
             self.disc = torch.compile(self.disc)
 
-    def to_train(self, mode: bool):
-        """Set components to train or val mode."""
-        self.vae.train(mode)
-        self.disc.train(mode)
-
     def train(self):
         """Start first stage training!"""
         
@@ -189,17 +187,15 @@ class VAETrainer:
         # If regular VAE sample from distribution.
         sample = True if self.bottleneck == "kl" else False
 
-        # Create inifinite stream of data.
-        train_data_iter = cycle(self.train_loader)
-
         # Start training run.
         for epoch in range(self.curr_epoch, self.epochs):
 
             # Training part.
-            self.to_train(True)
+            self.vae.train(True)
+            self.disc.train(True)
             self.vae_optim.zero_grad()
             self.disc_optim.zero_grad()
-            for step in tqdm(range(len(self.train_loader) // self.accumulation_steps), desc=f"Epoch {epoch}", ncols=100):
+            for step, x in tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc=f"Epoch {epoch}", ncols=100):
                 
                 adjusted_step = epoch * len(self.train_loader) + step
 
@@ -216,7 +212,7 @@ class VAETrainer:
 
                 # Plot examples to MLflow.
                 if (adjusted_step + 1) % self.log_imgs_freq == 0:
-                    self.to_train(False)
+                    self.vae.train(False)
                     images = np.load(self.plot_set)
                     images = torch.from_numpy(images).to(self.device)
                     images = images.permute(0, 3, 1, 2).float() / 255.0
@@ -226,73 +222,49 @@ class VAETrainer:
                         reconstructed.clamp_(-1.0, 1.0)
                     figure = plot_images(images, reconstructed)
                     self.logger.log_figure(f"plots/{adjusted_step}_recon.png", figure)
-                    self.to_train(True)
+                    self.vae.train(True)
 
                 # Measure time of each iteration.
                 t1 = time.time()
 
-                # Forward passes.
-                for _ in range(self.accumulation_steps):
-                    x = next(train_data_iter)
-                    x = x.to(self.device)
+                # There is a potential bug when using grad accumulation with EMA.
+                # Since codebooks in th VQ model are updated at each micro-batch 
+                # and not once after accumulating all of the micro-batches.
+                # This results in slightly different loss and gradients.
+                # So sadly no grad accumulation :c 
+                x = x.to(self.device)
 
-                    # Reconstructions.
-                    with self.ctx:
-                        x_hat, prior_loss, perplexity = self.vae(x, sample=sample)
-                        x_hat.clamp_(-1.0, 1.0)
+                # Reconstructions.
+                with self.ctx:
+                    x_hat, prior_loss, perplexity = self.vae(x, return_metrics=True, sample=sample)
+                    x_hat.clamp_(-1.0, 1.0)
 
-                    self.holder.store_variable("vae/prior_loss", prior_loss)
-                    if self.bottleneck == "vq":
-                        self.holder.store_variable("vae/perplexity", perplexity)
+                self.holder.store_variable("vae/prior_loss", prior_loss)
+                if self.bottleneck == "vq":
+                    self.holder.store_variable("vae/perplexity", perplexity)
 
-                    # (1) Update Discriminator.
-                    self.disc.requires_grad_(True)
-                    self.vae.requires_grad_(False)
-                    if adjusted_step >= self.disc_start:
-                        with self.ctx:
-                            
-                            # Discriminator loss.
-                            disc_fake = self.disc(x_hat.detach())
-                            disc_real = self.disc(x)
-                            d_loss = self.d_loss(disc_fake, disc_real)
-                            disc_loss = self.disc_weight * d_loss
-                            self.holder.store_variable("gan/d_loss", d_loss)
-
-                        # Backward pass for each micro-batch.
-                        self.disc_scaler.scale(disc_loss / self.accumulation_steps).backward()
-                            
-                        # Calculate accuracies of Discriminator.
-                        fake_pred_class = (disc_fake.sigmoid() < 0.5).float()
-                        real_pred_class = (disc_real.sigmoid() >= 0.5).float()
-                        self.holder.store_variable("gan/fake_acc", fake_pred_class.mean())
-                        self.holder.store_variable("gan/real_acc", real_pred_class.mean())
-
-                    # (2) Update Generator (VAE).
-                    self.disc.requires_grad_(False)
-                    self.vae.requires_grad_(True)
-                    with self.ctx:
-
-                        # Calculate Generator losses.
-                        percept_loss = self.percept_loss(x, x_hat)
-                        recon_loss = self.recon_loss(x, x_hat)
-                        gen_loss = (
-                            percept_loss * self.percept_weight +
-                            recon_loss * self.recon_weight +
-                            prior_loss * self.prior_weight
-                        )
-
-                        if adjusted_step >= self.disc_start:
-                            g_loss = self.g_loss(self.disc(x_hat))
-                            gen_loss += g_loss * self.disc_weight
-                            self.holder.store_variable("gan/g_loss", g_loss)
-                    
-                    # Backward pass for each micro-batch.
-                    self.vae_scaler.scale(gen_loss / self.accumulation_steps).backward()
-                    
-                    self.holder.store_variable("vae/percept_loss", percept_loss)
-                    self.holder.store_variable("vae/recon_loss", recon_loss)
-
+                # (1) Update Discriminator.
                 if adjusted_step >= self.disc_start:
+
+                    self.disc_optim.zero_grad()
+                    with self.ctx:
+                        
+                        # Discriminator loss.
+                        disc_fake = self.disc(x_hat.detach())
+                        disc_real = self.disc(x)
+                        d_loss = self.d_loss(disc_fake, disc_real)
+                        disc_loss = self.disc_weight * d_loss
+                        self.holder.store_variable("gan/d_loss", d_loss)
+
+                    # Backward pass for Discriminator.
+                    self.disc_scaler.scale(disc_loss).backward()
+                            
+                    # Calculate accuracies of Discriminator.
+                    fake_pred_class = (disc_fake.sigmoid() < 0.5).float()
+                    real_pred_class = (disc_real.sigmoid() >= 0.5).float()
+                    self.holder.store_variable("gan/fake_acc", fake_pred_class.mean())
+                    self.holder.store_variable("gan/real_acc", real_pred_class.mean())
+
                     # Clip gradients for Discriminator.
                     if self.clip_grad is not None:
                         self.disc_scaler.unscale_(self.disc_optim)
@@ -306,9 +278,32 @@ class VAETrainer:
                     # Optimizer step and zero gradients for Discriminator.
                     self.disc_scaler.step(self.disc_optim)
                     self.disc_scaler.update()
-                    self.disc_optim.zero_grad()
 
-                # Clip gradients for VAE.
+                # (2) Update Generator (VAE).
+                self.vae_optim.zero_grad()
+                with self.ctx:
+
+                    # Calculate Generator losses.
+                    percept_loss = self.percept_loss(x, x_hat)
+                    recon_loss = self.recon_loss(x, x_hat)
+                    gen_loss = (
+                        percept_loss * self.percept_weight +
+                        recon_loss * self.recon_weight +
+                        prior_loss * self.prior_weight
+                    )
+
+                    if adjusted_step >= self.disc_start:
+                        g_loss = self.g_loss(self.disc(x_hat))
+                        gen_loss += g_loss * self.disc_weight
+                        self.holder.store_variable("gan/g_loss", g_loss)
+                    
+                # Backward pass for Generator.
+                self.vae_scaler.scale(gen_loss).backward()
+                
+                self.holder.store_variable("vae/percept_loss", percept_loss)
+                self.holder.store_variable("vae/recon_loss", recon_loss)
+
+                # Clip gradients for Generator.
                 if self.clip_grad is not None:
                     self.vae_scaler.unscale_(self.vae_optim)
                     gen_grad = nn.utils.clip_grad_norm_(
@@ -318,15 +313,16 @@ class VAETrainer:
                 else: gen_grad = -1.0
                 self.holder.store_variable("vae/vae_grad", gen_grad)
 
-                # Optimizer step and zero gradients for VAE.
+                # Optimizer step and zero gradients for Generator.
                 self.vae_scaler.step(self.vae_optim)
                 self.vae_scaler.update()
-                self.vae_optim.zero_grad()
 
-                # False measurement since we do not wait for GPU to finish?
+                # False measurement since we do not wait for the GPU to finish.
                 # Should use `torch.cuda.synchronize()`
+                # But it is only used to track overall speed of training in Colab
+                # so it is good enough.
                 t2 = time.time()
-                imgs_per_sec = self.accumulation_steps * self.batch_size / (t2 - t1)
+                imgs_per_sec = self.batch_size / (t2 - t1)
                 self.holder.store_variable("util/imgs_per_sec", imgs_per_sec)
 
                 # Log metrics to MLflow.
@@ -336,7 +332,8 @@ class VAETrainer:
                         self.logger.log_metric(key, metric, step=adjusted_step)
 
             # Evaluation Part.
-            self.to_train(False)
+            self.vae.train(False)
+            self.disc.train(False)
             recon_loss_dev = 0.0
             percept_loss_dev = 0.0
             if self.bottleneck == "vq":
@@ -385,6 +382,7 @@ class VAETrainer:
             checkpoint_path = os.path.join(self.checkpoints_dir, self.run_name, checkpoint_name)
             save_checkpoint(
                 checkpoint_path, 
+                self.architecture,
                 epoch=epoch,
                 vae=self.vae, 
                 disc=self.disc, 

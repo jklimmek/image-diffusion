@@ -5,10 +5,10 @@ enc_num_res_blocks: 2
 dec_num_res_blocks: 2
 attn_resolutions: [] 
 num_heads: 1
-bottleneck: kl
-codebook_size: null
-codebook_beta: null
-codebook_gamma: null
+bottleneck: vq
+codebook_size: 1024
+codebook_beta: 0.25
+codebook_gamma: 0.99
 disc_channels: [64, 128, 256]
 z_dim: 3
 init_resolution: 128
@@ -17,14 +17,14 @@ num_groups: 32
 # Training
 recon_weight: 1.0
 percept_weight: 1.0
-prior_weight: 5e-6
+prior_weight: 1.0
 disc_weight: 0.1
-disc_start: 15000
+disc_start: 12000
 gan_loss: "bce" # "bce", "mse" or "hinge"
 learning_rate: 1e-5
 warmup_steps: 0
-batch_size: 24
-epochs: 15
+batch_size: 16
+epochs: 10
 clip_grad: 1.0
 precision: fp16
 compile: true

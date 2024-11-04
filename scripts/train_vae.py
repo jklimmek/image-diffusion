@@ -2,7 +2,7 @@ import argparse
 import numpy  as np
 import torch
 from torch.utils.data import Dataset
-from torchvision.transforms import Compose, Normalize
+from torchvision.transforms import Compose, Normalize, RandomHorizontalFlip
 from trainers.vae_trainer import VAETrainer
 from modules.components import Discriminator
 from modules.vae import VAE
@@ -12,7 +12,7 @@ from modules.util import *
 class VAEDataset(Dataset):
 
     def __init__(self, path: str, transforms: Compose = None):
-        self.data = np.load(path)[:1000]
+        self.data = np.load(path)
         self.transforms = transforms
 
     def __getitem__(self, index: int):
@@ -60,7 +60,15 @@ def parse_args():
 
 def main():
     args = parse_args()
-    transforms = Compose(
+    train_transforms = Compose(
+        [
+            numpy_to_tensor,
+            lambda img: img / 255.0,
+            Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+            RandomHorizontalFlip(p=0.5)
+        ]
+    )
+    dev_transforms = Compose(
         [
             numpy_to_tensor,
             lambda img: img / 255.0,
@@ -95,8 +103,8 @@ def main():
         args["disc_channels"]
     )
 
-    train_ds = VAEDataset(args["train_set"], transforms=transforms)
-    dev_ds = VAEDataset(args["dev_set"], transforms=transforms)
+    train_ds = VAEDataset(args["train_set"], transforms=train_transforms)
+    dev_ds = VAEDataset(args["dev_set"], transforms=dev_transforms)
     logger = BasicLogger(args["logs_dir"], args["run_name"], args["no_mlflow"], args["log_interval"])
     holder = MetricHolder(args["log_interval"])
     

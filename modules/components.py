@@ -305,11 +305,9 @@ class Codebook(nn.Module):
         quant_out = einops.rearrange(quant_out, "(B H W) C -> B C H W", H=H, W=W)
 
         # Calculate perplexity.
-        # Perplexity is tied to batch size, 
-        # so it is not an ideal way of measuring codebook usage.
         one_hot = F.one_hot(indices, num_classes=self.size).float()
         avg_probs = one_hot.mean(dim=0)
-        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-6))).item()
+        perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-6)))
 
         return quant_out, quant_loss, perplexity
     

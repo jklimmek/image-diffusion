@@ -30,6 +30,8 @@ class VAE(nn.Module):
         self.encoder = Encoder(
             in_channels, 
             channels, 
+            # Double the bottleneck size if needed,
+            # since we need mean and std to sample.
             z_dim if bottleneck == "vq" else 2 * z_dim,
             enc_num_res_blocks, 
             attn_resolutions, 
@@ -58,10 +60,8 @@ class VAE(nn.Module):
             )
         else: self.codebook = None
 
-    def forward(self, x, return_metrics=True, sample=False):
-        if self.bottleneck == "vq" and sample:
-            raise ValueError("Cannot sample from the VQ model!")
-        
+    def forward(self, x, return_metrics=False):
+        sample = True if self.bottleneck == "kl" else False
         z, loss, perplexity = self.encode(x, sample=sample)
         x_hat = self.decode(z)
 
@@ -103,7 +103,10 @@ class VAE(nn.Module):
     @classmethod
     def from_checkpoint(cls, path):
         checkpoint = torch.load(path)
-        model_params = checkpoint['architecture']
+        model_params = checkpoint["architecture"]
         model = cls(**model_params)
-        model.load_state_dict(checkpoint['checkpoint'])
+        state = checkpoint["vae"].items()
+        # Get rid off prefix that `torch.compile` leaves.
+        state = {key.replace('_orig_mod.', ''): value for key, value in state}
+        model.load_state_dict(state)
         return model
