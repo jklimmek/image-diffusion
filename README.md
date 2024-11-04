@@ -3,7 +3,7 @@ My implementation of latent diffusion model trained from scratch to generate sma
 
 
 ## The dataset
-The dataset used was [LHQ (Landscapes High-Quality)](https://paperswithcode.com/dataset/lhq) with 90,000 landscapes. Due to computational restrictions (Google Colab's free T4) the pictures were resized to 128x128 resolution. Trainined dataset consisted of 81,000 samples and dev set of 9,000 samples.
+The dataset used was [LHQ (Landscapes High-Quality)](https://paperswithcode.com/dataset/lhq) with 90,000 landscapes. Due to computational restrictions (Google Colab's free T4) the pictures were resized to 128x128 resolution. Train dataset consisted of 81,000 samples and dev set of 9,000 samples.
 
 
 ## The overall approach
