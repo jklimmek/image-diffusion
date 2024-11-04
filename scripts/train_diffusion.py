@@ -3,6 +3,8 @@ import numpy  as np
 import torch
 from torch.utils.data import Dataset
 from trainers.diffusion_trainer import DiffusionTrainer
+from modules.unet import Unet
+from modules.components import Scheduler
 from modules.util import *
 
 
@@ -15,8 +17,7 @@ class DiffusionDataset(Dataset):
     def __getitem__(self, index: int):
         x = self.latents[index]
         y = self.classes[index]
-        # Return only place label for now.
-        return x, y[0]
+        return x, y
     
     def __len__(self):
         return len(self.latents)
@@ -64,12 +65,33 @@ def main():
     seed_everything(args["seed"], args["epochs"])
 
     # Set up training components.
+    unet = Unet(
+        args["z_dim"],
+        args["channels"],
+        args["mid_channels"],
+        args["time_dim"],
+        args["num_res_layers"],
+        args["num_heads"],
+        args["num_groups"],
+        args["num_classes"],
+    )
+
+    scheduler = Scheduler(
+        args["num_steps"],
+        args["beta_start"],
+        args["beta_end"],
+        args["noise_type"],
+        args["device"]
+    )
+
     train_ds = DiffusionDataset(args["train_set"], args["train_labels"])
     logger = BasicLogger(args["logs_dir"], args["run_name"], args["no_mlflow"], args["log_interval"])
     holder = MetricHolder(args["log_interval"])
     
     trainer = DiffusionTrainer(
         args,
+        unet,
+        scheduler,
         train_ds,
         logger,
         holder

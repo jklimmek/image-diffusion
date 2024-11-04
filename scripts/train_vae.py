@@ -2,12 +2,14 @@ import argparse
 import numpy  as np
 import torch
 from torch.utils.data import Dataset
-from torchvision.transforms import Compose, Normalize
-from trainers.vqgan_trainer import VQGANTrainer
+from torchvision.transforms import Compose, Normalize, RandomHorizontalFlip
+from trainers.vae_trainer import VAETrainer
+from modules.components import Discriminator
+from modules.vae import VAE
 from modules.util import *
 
 
-class VQDataset(Dataset):
+class VAEDataset(Dataset):
 
     def __init__(self, path: str, transforms: Compose = None):
         self.data = np.load(path)
@@ -51,14 +53,22 @@ def parse_args():
     if args["experiment_name"] is not None:
         run_name = args["experiment_name"]
     else:
-        run_name = get_run_name("vqgan")
+        run_name = get_run_name("vae")
     args["run_name"] = run_name
     return args
 
 
 def main():
     args = parse_args()
-    transforms = Compose(
+    train_transforms = Compose(
+        [
+            numpy_to_tensor,
+            lambda img: img / 255.0,
+            Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+            RandomHorizontalFlip(p=0.5)
+        ]
+    )
+    dev_transforms = Compose(
         [
             numpy_to_tensor,
             lambda img: img / 255.0,
@@ -72,13 +82,36 @@ def main():
     seed_everything(args["seed"], args["epochs"])
 
     # Set up training components.
-    train_ds = VQDataset(args["train_set"], transforms=transforms)
-    dev_ds = VQDataset(args["dev_set"], transforms=transforms)
+    vae = VAE(
+        args["in_channels"],
+        args["channels"],
+        args["z_dim"],
+        args["bottleneck"],
+        args["codebook_size"],
+        args["codebook_beta"],
+        args["codebook_gamma"],
+        args["enc_num_res_blocks"],
+        args["dec_num_res_blocks"],
+        args["attn_resolutions"],
+        args["num_heads"],
+        args["init_resolution"],
+        args["num_groups"]
+    )
+
+    disc = Discriminator(
+        args["in_channels"],
+        args["disc_channels"]
+    )
+
+    train_ds = VAEDataset(args["train_set"], transforms=train_transforms)
+    dev_ds = VAEDataset(args["dev_set"], transforms=dev_transforms)
     logger = BasicLogger(args["logs_dir"], args["run_name"], args["no_mlflow"], args["log_interval"])
     holder = MetricHolder(args["log_interval"])
     
-    trainer = VQGANTrainer(
+    trainer = VAETrainer(
         args,
+        vae, 
+        disc,
         train_ds,
         dev_ds,
         logger,

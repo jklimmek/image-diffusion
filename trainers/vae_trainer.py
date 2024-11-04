@@ -1,5 +1,5 @@
 # Modules :
-# - VQGANTrainer ✔️
+# - VAETrainer ✔️
 
 import os
 import contextlib
@@ -13,9 +13,9 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity as LPIPS
 from torchmetrics.image.fid import FrechetInceptionDistance as FID
-from itertools import chain
 from modules.util import *
-from modules.vqgan_components import *
+from modules.components import Discriminator
+from modules.vae import VAE
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Arguments other than a weight enum.*")
@@ -64,11 +64,13 @@ def bce_g_loss(fake: torch.Tensor):
     return g_loss
 
 
-class VQGANTrainer:
+class VAETrainer:
 
     def __init__(
             self,
             args: dict,
+            vae: VAE,
+            disc: Discriminator,
             train_set: Dataset,
             dev_set: Dataset,
             logger: BasicLogger,
@@ -79,43 +81,29 @@ class VQGANTrainer:
         for k, v in args.items():
             setattr(self, k, v)
 
+        # It is needed to load VAE checkpoint for inference without knowing it's architecture.
+        self.architecture = {
+            "in_channels": self.in_channels,
+            "channels": self.channels,
+            "z_dim": self.z_dim,
+            "bottleneck": self.bottleneck,
+            "codebook_size": self.codebook_size,
+            "codebook_beta": self.codebook_beta,
+            "codebook_gamma": self.codebook_gamma,
+            "enc_num_res_blocks": self.enc_num_res_blocks,
+            "dec_num_res_blocks": self.dec_num_res_blocks,
+            "attn_resolutions": self.attn_resolutions,
+            "num_heads": self.num_heads,
+            "init_resolution": self.init_resolution,
+            "num_groups": self.num_groups
+        }
+
         # Set up components.
-        self.encoder = Encoder(
-            self.in_channels, 
-            self.channels, 
-            self.z_dim, 
-            self.enc_num_res_blocks, 
-            self.attn_resolutions, 
-            self.init_resolution, 
-            self.num_groups
-        )
+        self.vae = vae 
+        self.disc = disc
 
-        self.decoder = Decoder(
-            self.in_channels,
-            self.channels[::-1],
-            self.z_dim,
-            self.dec_num_res_blocks,
-            self.attn_resolutions,
-            self.init_resolution // 2 ** len(self.channels),
-            self.num_groups
-        )
-
-        self.codebook = Codebook(
-            self.codebook_size,
-            self.z_dim,
-            self.codebook_beta,
-            self.codebook_gamma
-        )
-
-        self.discriminator = Discriminator(
-            self.in_channels,
-            self.disc_channels,
-        )
-
-        self.encoder.to(self.device)
-        self.decoder.to(self.device)
-        self.codebook.to(self.device)
-        self.discriminator.to(self.device)
+        self.vae.to(self.device)
+        self.disc.to(self.device)
 
         self.logger = logger
         self.holder = holder
@@ -125,41 +113,26 @@ class VQGANTrainer:
         self.d_loss = {"mse": mse_d_loss, "bce": bce_d_loss, "hinge": hinge_d_loss}[self.gan_loss]
         self.g_loss = {"mse": mse_g_loss, "bce": bce_g_loss, "hinge": hinge_g_loss}[self.gan_loss]
         self.percept_loss = LPIPS(net_type="vgg").eval().to(self.device)
-        for param in self.percept_loss.parameters():
-            if param.requires_grad:
-                param.requires_grad_(False)
+        self.percept_loss.requires_grad_(False)
         
         # Set up recunstruction quality metrics.
         self.fid = FID(reset_real_features=False, normalize=True).eval().to(self.device)
 
         # Set up optimizers.
-        disc_params = list(self.discriminator.parameters())
-        vqvae_params = list(
-            chain(
-                self.encoder.parameters(),
-                self.decoder.parameters(),
-                self.codebook.parameters()
-            )
-        )
-
-        self.vqvae_optim = optim.Adam(vqvae_params, lr=self.learning_rate)
-        self.disc_optim = optim.Adam(disc_params, lr=self.learning_rate)
+        self.vae_optim = optim.Adam(self.vae.parameters(), lr=self.learning_rate)
+        self.disc_optim = optim.Adam(self.disc.parameters(), lr=self.learning_rate)
 
         # Log number of params.
         num_params = lambda model: sum(p.numel() for p in model.parameters() if p.requires_grad)
-        enc = num_params(self.encoder)
-        dec = num_params(self.decoder)
-        codebook = num_params(self.codebook)
-        disc = num_params(self.discriminator)
-        self.logger.log_console(f"Encoder has {enc:,} params.")
-        self.logger.log_console(f"Decoder has {dec:,} params.")
-        self.logger.log_console(f"Codebook has {codebook:,} params.")
-        self.logger.log_console(f"Discriminator has {disc:,} params.")
-        self.logger.log_console(f"Total trainable params {enc + dec + codebook + disc:,}")
+        num_vae_params = num_params(self.vae)
+        num_disc_params = num_params(self.disc)
+        self.logger.log_console(f"VAE has {num_vae_params:,} params.")
+        self.logger.log_console(f"Discriminator has {num_disc_params:,} params.")
+        self.logger.log_console(f"Total trainable params {num_vae_params + num_disc_params:,}")
 
         # Set up gradient scaling.
         enable_scaler = self.precision == torch.float16
-        self.vqvae_scaler = torch.cuda.amp.GradScaler(enabled=enable_scaler)
+        self.vae_scaler = torch.cuda.amp.GradScaler(enabled=enable_scaler)
         self.disc_scaler = torch.cuda.amp.GradScaler(enabled=enable_scaler)
 
         if self.device == "cpu":
@@ -184,11 +157,9 @@ class VQGANTrainer:
         if self.checkpoint is not None:
             self.curr_epoch = load_checkpoint(
                 self.checkpoint,
-                encoder=self.encoder,
-                decoder=self.decoder,
-                codebook=self.codebook,
-                discriminator=self.discriminator,
-                vqvae_optim=self.vqvae_optim,
+                vae=self.vae,
+                disc=self.disc,
+                vae_optim=self.vae_optim,
                 disc_optim=self.disc_optim
             ) + 1
             self.logger.log_console(f"Loading model checkpoint from {self.checkpoint}")
@@ -199,20 +170,11 @@ class VQGANTrainer:
         # Compile the model if specified. Works only on Linux.
         if self.compile:
             self.logger.log_console("Model is compiling. This will take a few minutes.")
-            self.encoder = torch.compile(self.encoder)
-            self.decoder = torch.compile(self.decoder)
-            self.codebook = torch.compile(self.codebook)
-            self.discriminator = torch.compile(self.discriminator)
-
-    def to_train(self, mode: bool):
-        """Set components to train or val mode."""
-        self.encoder.train(mode)
-        self.decoder.train(mode)
-        self.codebook.train(mode)
-        self.discriminator.train(mode)
+            self.vae = torch.compile(self.vae)
+            self.disc = torch.compile(self.disc)
 
     def train(self):
-        """Start VQ-GAN training!"""
+        """Start first stage training!"""
         
         # Log hyperparameteres to MLflow. 
         self.logger.log_params(
@@ -222,39 +184,64 @@ class VQGANTrainer:
             loss=self.gan_loss
         )
 
+        # If regular VAE sample from distribution.
+        sample = True if self.bottleneck == "kl" else False
+
         # Start training run.
         for epoch in range(self.curr_epoch, self.epochs):
 
             # Training part.
-            self.to_train(True)
+            self.vae.train(True)
+            self.disc.train(True)
+            self.vae_optim.zero_grad()
+            self.disc_optim.zero_grad()
             for step, x in tqdm(enumerate(self.train_loader), total=len(self.train_loader), desc=f"Epoch {epoch}", ncols=100):
                 
                 adjusted_step = epoch * len(self.train_loader) + step
 
+                # Learning rate warm-up schedule.
+                if adjusted_step < self.warmup_steps:
+                    min_lr = self.learning_rate / 100
+                    lr = min_lr + (self.learning_rate - min_lr) * (adjusted_step / self.warmup_steps)
+                else:
+                    lr = self.learning_rate
+
+                # Update the optimizer's learning rate.
+                for param_group in self.vae_optim.param_groups:
+                    param_group['lr'] = lr
+
                 # Plot examples to MLflow.
                 if (adjusted_step + 1) % self.log_imgs_freq == 0:
-                    self.to_train(False)
+                    self.vae.train(False)
                     images = np.load(self.plot_set)
                     images = torch.from_numpy(images).to(self.device)
                     images = images.permute(0, 3, 1, 2).float() / 255.0
                     images = (images - 0.5) / 0.5
                     with torch.no_grad():
-                        z = self.encoder(images)
-                        z_q, _, _ = self.codebook(z)
-                        reconstructed = self.decoder(z_q).clamp(-1.0, 1.0)
+                        reconstructed = self.vae(images, return_metrics=False, sample=sample)
+                        reconstructed.clamp_(-1.0, 1.0)
                     figure = plot_images(images, reconstructed)
-                    self.logger.log_figure(f"plots/{adjusted_step}_reconstructed.png", figure)
-                    self.to_train(True)
+                    self.logger.log_figure(f"plots/{adjusted_step}_recon.png", figure)
+                    self.vae.train(True)
 
-                # Measure time and move data to device.
+                # Measure time of each iteration.
                 t1 = time.time()
+
+                # There is a potential bug when using grad accumulation with EMA.
+                # Since codebooks in th VQ model are updated at each micro-batch 
+                # and not once after accumulating all of the micro-batches.
+                # This results in slightly different loss and gradients.
+                # So sadly no grad accumulation :c 
                 x = x.to(self.device)
 
                 # Reconstructions.
                 with self.ctx:
-                    z = self.encoder(x)
-                    z_q, quant_loss, perplexity = self.codebook(z)
-                    x_hat = self.decoder(z_q).clamp(-1.0, 1.0)
+                    x_hat, prior_loss, perplexity = self.vae(x, return_metrics=True, sample=sample)
+                    x_hat.clamp_(-1.0, 1.0)
+
+                self.holder.store_variable("vae/prior_loss", prior_loss)
+                if self.bottleneck == "vq":
+                    self.holder.store_variable("vae/perplexity", perplexity)
 
                 # (1) Update Discriminator.
                 if adjusted_step >= self.disc_start:
@@ -263,41 +250,37 @@ class VQGANTrainer:
                     with self.ctx:
                         
                         # Discriminator loss.
-                        disc_fake = self.discriminator(x_hat.detach())
-                        disc_real = self.discriminator(x)
+                        disc_fake = self.disc(x_hat.detach())
+                        disc_real = self.disc(x)
                         d_loss = self.d_loss(disc_fake, disc_real)
                         disc_loss = self.disc_weight * d_loss
-                        
+                        self.holder.store_variable("gan/d_loss", d_loss)
+
+                    # Backward pass for Discriminator.
+                    self.disc_scaler.scale(disc_loss).backward()
+                            
                     # Calculate accuracies of Discriminator.
                     fake_pred_class = (disc_fake.sigmoid() < 0.5).float()
                     real_pred_class = (disc_real.sigmoid() >= 0.5).float()
-                    fake_acc = fake_pred_class.mean()
-                    real_acc = real_pred_class.mean()
-
-                    # Backward Discriminator pass.
-                    self.disc_scaler.scale(disc_loss).backward()
+                    self.holder.store_variable("gan/fake_acc", fake_pred_class.mean())
+                    self.holder.store_variable("gan/real_acc", real_pred_class.mean())
 
                     # Clip gradients for Discriminator.
                     if self.clip_grad is not None:
                         self.disc_scaler.unscale_(self.disc_optim)
                         disc_grad = torch.nn.utils.clip_grad_norm_(
-                            self.discriminator.parameters(), 
+                            self.disc.parameters(), 
                             self.clip_grad
                         ).item()
                     else: disc_grad = -1.0
+                    self.holder.store_variable("gan/disc_grad", disc_grad)
 
-                    # Update Discriminator params.
+                    # Optimizer step and zero gradients for Discriminator.
                     self.disc_scaler.step(self.disc_optim)
                     self.disc_scaler.update()
 
-                    # Store Discriminator metrics.
-                    self.holder.store_variable("gan/d_loss", d_loss)
-                    self.holder.store_variable("gan/disc_grad", disc_grad)
-                    self.holder.store_variable("gan/real_acc", real_acc)
-                    self.holder.store_variable("gan/fake_acc", fake_acc)
-
                 # (2) Update Generator (VAE).
-                self.vqvae_optim.zero_grad()
+                self.vae_optim.zero_grad()
                 with self.ctx:
 
                     # Calculate Generator losses.
@@ -306,45 +289,38 @@ class VQGANTrainer:
                     gen_loss = (
                         percept_loss * self.percept_weight +
                         recon_loss * self.recon_weight +
-                        quant_loss * self.quant_weight
+                        prior_loss * self.prior_weight
                     )
 
                     if adjusted_step >= self.disc_start:
-                        g_loss = self.g_loss(self.discriminator(x_hat))
+                        g_loss = self.g_loss(self.disc(x_hat))
                         gen_loss += g_loss * self.disc_weight
                         self.holder.store_variable("gan/g_loss", g_loss)
+                    
+                # Backward pass for Generator.
+                self.vae_scaler.scale(gen_loss).backward()
+                
+                self.holder.store_variable("vae/percept_loss", percept_loss)
+                self.holder.store_variable("vae/recon_loss", recon_loss)
 
-                # Backward pass.
-                self.vqvae_scaler.scale(gen_loss).backward()
-
-                # Clip gradients for VAE.
+                # Clip gradients for Generator.
                 if self.clip_grad is not None:
-                    self.vqvae_scaler.unscale_(self.vqvae_optim)
-                    vqvae_grad = nn.utils.clip_grad_norm_(
-                        list(
-                            chain(
-                                self.encoder.parameters(),
-                                self.decoder.parameters(),
-                                self.codebook.parameters()
-                            )
-                        ), 
+                    self.vae_scaler.unscale_(self.vae_optim)
+                    gen_grad = nn.utils.clip_grad_norm_(
+                        self.vae.parameters(),
                         self.clip_grad
                     ).item()
-                else: vqvae_grad = -1.0
+                else: gen_grad = -1.0
+                self.holder.store_variable("vae/vae_grad", gen_grad)
 
-                # Update params.
-                self.vqvae_scaler.step(self.vqvae_optim)
-                self.vqvae_scaler.update()
+                # Optimizer step and zero gradients for Generator.
+                self.vae_scaler.step(self.vae_optim)
+                self.vae_scaler.update()
 
-                # Store Generator metrics.
-                self.holder.store_variable("vqvae/recon_loss", recon_loss)
-                self.holder.store_variable("vqvae/percept_loss", percept_loss)
-                self.holder.store_variable("vqvae/quant_loss", quant_loss)
-                self.holder.store_variable("vqvae/vqvae_grad", vqvae_grad)
-                self.holder.store_variable("vqvae/perplexity", perplexity)
-
-                # False measurement since we do not wait for GPU to finish?
+                # False measurement since we do not wait for the GPU to finish.
                 # Should use `torch.cuda.synchronize()`
+                # But it is only used to track overall speed of training in Colab
+                # so it is good enough.
                 t2 = time.time()
                 imgs_per_sec = self.batch_size / (t2 - t1)
                 self.holder.store_variable("util/imgs_per_sec", imgs_per_sec)
@@ -356,19 +332,20 @@ class VQGANTrainer:
                         self.logger.log_metric(key, metric, step=adjusted_step)
 
             # Evaluation Part.
-            self.to_train(False)
+            self.vae.train(False)
+            self.disc.train(False)
             recon_loss_dev = 0.0
             percept_loss_dev = 0.0
-            perplexity_dev = 0.0
+            if self.bottleneck == "vq":
+                perplexity_dev = 0.0
 
             for step, x in tqdm(enumerate(self.dev_loader), total=len(self.dev_loader), desc=f"Dev {epoch}", ncols=100):
                 with torch.no_grad():
 
                     # Forward pass.
                     x = x.to(self.device)
-                    z = self.encoder(x)
-                    z_q, quant_loss, perplexity = self.codebook(z)
-                    x_hat = self.decoder(z_q).clamp(-1.0, 1.0)
+                    x_hat, _, perplexity = self.vae(x, return_metrics=True, sample=sample)
+                    x_hat.clamp_(-1.0, 1.0)
 
                     # Calculate losses.
                     percept_loss = self.percept_loss(x, x_hat)
@@ -386,7 +363,8 @@ class VQGANTrainer:
                 # Calculate dev metrics.
                 recon_loss_dev += recon_loss.item() / len(self.dev_loader)
                 percept_loss_dev += percept_loss.item() / len(self.dev_loader)
-                perplexity_dev += perplexity / len(self.dev_loader)
+                if self.bottleneck == "vq":
+                    perplexity_dev += perplexity / len(self.dev_loader)
 
             # Calculate FID.
             fid = self.fid.compute()
@@ -395,19 +373,19 @@ class VQGANTrainer:
             # Log all dev metrics.
             self.logger.log_metric("dev/recon_loss", recon_loss_dev, step=epoch)
             self.logger.log_metric("dev/percept_loss", percept_loss_dev, step=epoch)
-            self.logger.log_metric("dev/perplexity", perplexity_dev, step=epoch)
             self.logger.log_metric("dev/FID", fid, step=epoch)
+            if self.bottleneck == "vq":
+                self.logger.log_metric("dev/perplexity", perplexity_dev, step=epoch)
 
             # Store model checkpoint locally.
-            checkpoint_name = f"vqvae-epoch-{epoch:02}.pt"
+            checkpoint_name = f"vae-epoch-{epoch:02}.pt"
             checkpoint_path = os.path.join(self.checkpoints_dir, self.run_name, checkpoint_name)
             save_checkpoint(
                 checkpoint_path, 
+                self.architecture,
                 epoch=epoch,
-                encoder=self.encoder, 
-                decoder=self.decoder, 
-                codebook=self.codebook, 
-                discriminator=self.discriminator, 
-                vqvae_optim=self.vqvae_optim, 
+                vae=self.vae, 
+                disc=self.disc, 
+                vae_optim=self.vae_optim, 
                 disc_optim=self.disc_optim
             )

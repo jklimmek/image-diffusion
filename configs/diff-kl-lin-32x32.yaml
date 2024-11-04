@@ -1,0 +1,34 @@
+# Architecture.
+z_dim: 3
+channels: [128, 256, 384, 512]
+mid_channels: [512, 512]
+time_dim: 512
+num_res_layers: 2
+num_heads: 8
+num_groups: 32
+num_classes: 3
+
+# Noise.
+num_steps: 1000
+beta_start: 0.0001
+beta_end: 0.02
+noise_type: linear
+
+# Training.
+ae_type: kl
+cond_drop_prob: 0.15
+learning_rate: 5e-5
+warmup_steps: 0
+batch_size: 24
+epochs: 130
+clip_grad: 1.0
+precision: fp32
+compile: false
+
+# Util.
+train_set: ./data/diffusion/kl/train.npy
+train_labels: ./data/diffusion/kl/train_labels.npy
+checkpoints_dir: ./checkpoints
+logs_dir: ./logs
+seed: 2018
+log_interval: 5
