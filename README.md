@@ -15,9 +15,9 @@ Two autoencoders were trained. The first one with quantized latent space (VQ-VAE
 
 The second autoencoder was trained with KL-regularized latent space (KL-VAE; ~36M params). A small penalty was applied to keep latents somewhat close to a shape of a normal distribution. The discriminator was turned on after 15,000 steps and the model trained until almost 24,000 steps with batch size of 48. I also noticed that it is rare to upload how metrics (eg. loss, gradients) change during training, which may be helpful for others to examine and detect potential instabilities during training their own models, so below I placed metrics from both VQ-VAE and KL-VAE training runs.
 
-The quality of reconstruction was measured using Frechet Inception DIstance (FID) and for both models it was almost the same; VQ-VAE with FID ~74 and for the KL-VAE with FID ~72. Images were compressed with the ratio of 4, but when I tried compressing them by a factor of 8 the results were much worse (a more powerful autoencoder was needed). Below are some of the first stage reconstructions from the dev set.
-
 ![Reconstructions](figures/stage1.png)
+
+The quality of reconstruction was measured using Frechet Inception DIstance (FID) and for both models it was almost the same; VQ-VAE with FID ~74 and for the KL-VAE with FID ~72. Images were compressed with the ratio of 4, but when I tried compressing them by a factor of 8 the results were much worse (a more powerful autoencoder was needed). Below are some of the first stage reconstructions from the dev set.
 
 ![VQ-Metrics](figures/trends.png)
 
