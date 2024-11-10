@@ -36,7 +36,7 @@ The results of trained Unet model are presented on figure 3. The model was small
 <br><br>
 
 ![KL-Samples](figures/stage2-3classes.png)<br>
-Figure 3. Second stage image generations of the KL model. Quality of the image depends on the cfg scale (numbers on the right).
+Figure 3. Second stage image generations of the KL model. Quality of the image depends on the cfg scale (numbers on the left).
 
 <br>
 
