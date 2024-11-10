@@ -125,5 +125,8 @@ class Unet(nn.Module):
         checkpoint = torch.load(path)
         model_params = checkpoint["architecture"]
         model = cls(**model_params)
-        model.load_state_dict(checkpoint["vae"])
+        state = checkpoint["unet"].items()
+        # Get rid off prefix that `torch.compile` leaves.
+        state = {key.replace('_orig_mod.', ''): value for key, value in state}
+        model.load_state_dict(state)
         return model
