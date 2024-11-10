@@ -11,7 +11,6 @@
 # - TimeEmbedding ✔️
 # - ConvBlock ✔️
 # - DiffusionBlock ✔️
-# - Unet ✔️
 
 import math
 import einops
