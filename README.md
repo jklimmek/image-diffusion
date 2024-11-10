@@ -11,7 +11,7 @@ Training was divided into two parts: (1) training an autoencoder with discrimina
 
 
 ### Autoencoders (stage 1)
-Two autoencoders were trained. The first one with quantized latent space (VQ-VAE; ~36M params) which consisted of 1024 entries updated via exponential moving average, with over 83% codebook utilization on dev set measured by perplexity. The descriminator was turned on after first 13,000 steps and the training continued until 22,000 steps with batch size of 48. 
+Two autoencoders were trained. The first one with quantized latent space (VQ-VAE; ~36M params) which consisted of 1024 entries updated via exponential moving average, with over 83% codebook utilization on dev set measured by perplexity. The descriminator was turned on after first 13,000 steps and the training continued until 22,000 steps with batch size of 48. All of the hyperparameters used can be found [here](configs/).
 
 The second autoencoder was trained with KL-regularized latent space (KL-VAE; ~36M params). A small penalty was applied to keep latents somewhat close to a shape of a normal distribution. The discriminator was turned on after 15,000 steps and the model trained until almost 24,000 steps with batch size of 48. I also noticed that it is rare to upload how metrics (eg. loss, gradients) change during training, which may be helpful for others to examine and detect potential instabilities during training their own models, so below on figure 2, I placed metrics from both VQ-VAE and KL-VAE training runs.
 
