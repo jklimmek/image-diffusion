@@ -38,6 +38,7 @@ def sample(args):
     cfg_scales = list(range(args["cfg"][0], args["cfg"][1]))
 
     # Sample images.
+    logging.info(f"Sampling {len(cfg_scales) * len(diffusion.classes)} images.")
     images = diffusion.sample(cfg_scales, seed=args["seed"])
 
     # Reshape images into grid.
@@ -50,22 +51,24 @@ def sample(args):
     # Add class names on the top and CFG scales on the left.
     for i, class_name in enumerate(diffusion.classes):
         ax.text(
-            i * grid.shape[1] // 3 + grid.shape[1] // 6, 
-            -10, class_name, 
-            ha='center', 
-            va='center', 
+            i * grid.shape[1] // len(diffusion.classes) + grid.shape[1] // (2 * len(diffusion.classes)), 
+            -10, 
+            class_name, 
+            ha="center", 
+            va="center", 
             fontsize=12, 
-            color='black'
+            color="black"
         )
+        
     for i, scale in enumerate(cfg_scales):
         ax.text(
             -20, 
             i * grid.shape[0] // len(cfg_scales) + grid.shape[0] // (2 * len(cfg_scales)), 
             str(scale), 
-            ha='center', 
-            va='center', 
+            ha="center", 
+            va="center", 
             fontsize=12, 
-            color='black'
+            color="black"
         )
 
     # Save images.
