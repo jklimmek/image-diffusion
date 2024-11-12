@@ -1,3 +1,7 @@
+# Modules :
+# - Unet ✔️
+
+import os
 import einops
 import torch
 import torch.nn as nn
@@ -21,8 +25,19 @@ class Unet(nn.Module):
         ):
         
         super().__init__()
+
         self.time_dim = time_dim
         self.num_classes = num_classes
+        self.architecture = {
+            "z_dim": z_dim,
+            "channels": channels,
+            "mid_channels": mid_channels,
+            "time_dim": time_dim,
+            "num_res_layers": num_res_layers,
+            "num_heads": num_heads,
+            "num_groups": num_groups,
+            "num_classes": num_classes
+        }
 
         self.class_embedding = nn.Embedding(self.num_classes, self.time_dim)
         self.time_embedding = TimeEmbedding(self.time_dim)
@@ -121,8 +136,11 @@ class Unet(nn.Module):
         return x
     
     @classmethod
-    def from_checkpoint(cls, path):
-        checkpoint = torch.load(path)
+    def from_checkpoint(cls, path=None, checkpoint=None):
+        if path is None and checkpoint is None:
+            raise ValueError("Either `path` or `checkpoint` must be specified.")
+        if path is not None:
+            checkpoint = torch.load(path)
         model_params = checkpoint["architecture"]
         model = cls(**model_params)
         state = checkpoint["unet"].items()
@@ -130,3 +148,12 @@ class Unet(nn.Module):
         state = {key.replace('_orig_mod.', ''): value for key, value in state}
         model.load_state_dict(state)
         return model
+    
+    def to_checkpoint(self, path):
+        components_dict = {
+            "unet": self.state_dict(),
+            "architecture": self.architecture
+        }
+        folder = os.path.dirname(path)
+        os.makedirs(folder, exist_ok=True)
+        torch.save(components_dict, path)

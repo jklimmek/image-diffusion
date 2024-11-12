@@ -1,3 +1,7 @@
+# Modules :
+# - VAE ✔️
+
+import os
 import torch
 import torch.nn as nn
 
@@ -24,7 +28,23 @@ class VAE(nn.Module):
         ):
 
         super().__init__()
+
         self.bottleneck = bottleneck
+        self.architecture = {
+            "in_channels": in_channels,
+            "channels": channels,
+            "z_dim": z_dim,
+            "bottleneck": bottleneck,
+            "codebook_size": codebook_size,
+            "codebook_beta": codebook_beta,
+            "codebook_gamma": codebook_gamma,
+            "enc_num_res_blocks": enc_num_res_blocks,
+            "dec_num_res_blocks": dec_num_res_blocks,
+            "attn_resolutions": attn_resolutions,
+            "num_heads": num_heads,
+            "init_resolution": init_resolution,
+            "num_groups": num_groups,
+        }
 
         # Set up components.
         self.encoder = Encoder(
@@ -101,8 +121,11 @@ class VAE(nn.Module):
         return x_hat
     
     @classmethod
-    def from_checkpoint(cls, path):
-        checkpoint = torch.load(path)
+    def from_checkpoint(cls, path=None, checkpoint=None):
+        if path is None and checkpoint is None:
+            raise ValueError("Either `path` or `checkpoint` must be specified.")
+        if path is not None:
+            checkpoint = torch.load(path)
         model_params = checkpoint["architecture"]
         model = cls(**model_params)
         state = checkpoint["vae"].items()
@@ -110,3 +133,12 @@ class VAE(nn.Module):
         state = {key.replace('_orig_mod.', ''): value for key, value in state}
         model.load_state_dict(state)
         return model
+    
+    def to_checkpoint(self, path):
+        components_dict = {
+            "vae": self.state_dict(),
+            "architecture": self.architecture
+        }
+        folder = os.path.dirname(path)
+        os.makedirs(folder, exist_ok=True)
+        torch.save(components_dict, path)

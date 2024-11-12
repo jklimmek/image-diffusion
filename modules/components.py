@@ -19,6 +19,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def to4d(x):
+    return x.view(-1, 1, 1, 1)
+
+
 class Residual(nn.Module):
      
     def __init__(self, in_channels: int, out_channels: int, num_groups: int):
@@ -371,6 +375,7 @@ class Scheduler:
         self.num_steps = num_steps
         self.beta_start = beta_start
         self.beta_end = beta_end
+        self.type = type
 
         if type == "cosine":
             offset = 8e-3
@@ -392,26 +397,27 @@ class Scheduler:
         self.sqrt_one_minus_alpha_cum_prod = torch.sqrt(1 - self.alpha_cum_prod)
         
     def add_noise(self, x, noise: torch.Tensor, t: torch.Tensor):
-        mu = self.sqrt_alpha_cum_prod[t].view(-1, 1, 1, 1)
-        sigma = self.sqrt_one_minus_alpha_cum_prod[t].view(-1, 1, 1, 1)
+        mu = to4d(self.sqrt_alpha_cum_prod[t])
+        sigma = to4d(self.sqrt_one_minus_alpha_cum_prod[t])
         noised = mu * x + sigma * noise
         return noised
     
     def sample_prev_timestep(self, xt: torch.Tensor, noise_pred: torch.Tensor, t: torch.Tensor):
-        sqrt_alpha_cum_prod_t = self.sqrt_alpha_cum_prod[t].view(-1, 1, 1, 1)
-        sqrt_one_minus_alpha_cum_prod_t = self.sqrt_one_minus_alpha_cum_prod[t].view(-1, 1, 1, 1)
+        # stolen code: https://github.com/explainingai-code/StableDiffusion-PyTorch
+        sqrt_alpha_cum_prod_t = to4d(self.sqrt_alpha_cum_prod[t])
+        sqrt_one_minus_alpha_cum_prod_t = to4d(self.sqrt_one_minus_alpha_cum_prod[t])
         x0 = (xt - (sqrt_one_minus_alpha_cum_prod_t * noise_pred)) / sqrt_alpha_cum_prod_t
         x0 = torch.clamp(x0, -1.0, 1.0)
-        betas_t = self.betas[t].view(-1, 1, 1, 1)
-        alphas_t = self.alphas[t].view(-1, 1, 1, 1)
+        betas_t = to4d(self.betas[t])
+        alphas_t = to4d(self.alphas[t])
         mean = xt - (betas_t * noise_pred) / sqrt_one_minus_alpha_cum_prod_t
         mean = mean / torch.sqrt(alphas_t)
 
         if t[0] == 0:
             return mean, x0
         else:
-            alpha_cum_prod_t_minus_1 = self.alpha_cum_prod[t - 1].view(-1, 1, 1, 1)
-            variance = (1 - alpha_cum_prod_t_minus_1) / (1.0 - self.alpha_cum_prod[t].view(-1, 1, 1, 1))
+            alpha_cum_prod_t_minus_1 = to4d(self.alpha_cum_prod[t - 1])
+            variance = (1 - alpha_cum_prod_t_minus_1) / (1.0 - to4d(self.alpha_cum_prod[t]))
             variance = variance * betas_t
             sigma = variance ** 0.5
             z = torch.randn_like(xt)

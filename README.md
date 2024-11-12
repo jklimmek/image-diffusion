@@ -32,7 +32,7 @@ In the second stage a latent diffusion model (Unet; ~66M params) was trained on 
 
 To condition model on some information I decided to use classifier-free guidance. I used [OpenAI's CLIP](https://openai.com/index/clip/) model to divide images into classes. At first I tried to extract 7 classes (a coast, a desert, a forest, a sky, a mountain, a body of water, a grassland) but there was a great disproportion and the [model struggled](figures/stage2-7classes.png) to generate under-represent classes such as a coast or a forest. In my second attempt I divided places into 3 classes, with more or less equal cardinality, by asking the model to choose whether an image represents a hot place, a cold place or a mild place. 
 
-The results of trained Unet model are presented on figure 3. The model was small so the quality is OK but not great. Unfortunately I was not able to compute the FID score as generating a grid of 27 images takes ~12 minutes on my GPU (and I was too lazy to do it using Google Colab)
+The results of trained Unet model are presented on figure 3. The model was small so the quality is OK but not great. Unfortunately I was not able to compute the FID score as generating a grid of 27 images takes ~12 minutes on my GPU (and I was too lazy to do it using Google Colab). But I created additional samples to inspect, they can be found in the [figures](figures/) folder.
 <br><br>
 
 ![KL-Samples](figures/stage2-3classes.png)<br>
