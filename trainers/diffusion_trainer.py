@@ -145,6 +145,7 @@ class DiffusionTrainer:
                 # If latents are from KL model, combine mean and log variance into one vector.
                 if sample:
                     mean, log_var = torch.chunk(x, chunks=2, dim=1)
+                    # Clipping as in CompVis repo, but `log_var` won't achieve such values anyways.
                     log_var = torch.clamp(log_var, -30.0, 20.0)
                     std = torch.exp(0.5 * log_var)
                     noise = torch.randn_like(mean, device=x.device)

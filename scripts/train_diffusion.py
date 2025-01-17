@@ -60,7 +60,7 @@ def main():
     args = parse_args()
 
     # Offset seed by the number of epochs in training run.
-    # This is becouse training is divided into smaller sub-runs
+    # This is because training is divided into smaller sub-runs
     # and this makes sure batches are random each sub-run.
     seed_everything(args["seed"], args["epochs"])
 
