@@ -1,9 +1,9 @@
 # image-diffusion
-My implementation of latent diffusion model trained from scratch to generate small pictures of landscapes. This repo probably contains too much voodoo, but it's for educational purposes only ¯\\\_(ツ)_/¯
+My implementation of latent diffusion model trained from scratch on a single T4 GPU to generate small pictures of landscapes. This repo probably contains too much voodoo, but it's for educational purposes only ¯\\\_(ツ)_/¯
 <br><br>
 
 ## The dataset
-The dataset used was [LHQ (Landscapes High-Quality)](https://paperswithcode.com/dataset/lhq) with 90,000 landscapes. Due to computational restrictions (Google Colab's free T4) the pictures were resized to 128x128 resolution. Train dataset consisted of 81,000 samples and dev set of 9,000 samples.
+The dataset used was [LHQ (Landscapes High-Quality)](https://paperswithcode.com/dataset/lhq) with 90,000 landscapes. Due to computational restrictions (Google Colab's free T4) the pictures were resized to 128x128 resolution. Train dataset consisted of 81,000 samples and dev set of 9,000 samples. To artificially increase the dataset size I used horizontal flip with probability 0.5.
 <br><br>
 
 ## The overall approach
@@ -26,7 +26,7 @@ Figure 1. First stage reconstructions of the autoencoders.
 <br>
 
 ![KL/VQ-Metrics](figures/trends1.png)
-Figure 2. First stage training metrics. There is something wrong with gradients in both training runs, but I was unable to find the cause of the problem.
+Figure 2. First stage training metrics.
 
 <br>
 
@@ -39,7 +39,7 @@ In the second stage a latent diffusion model (Unet; ~66M params) was trained on 
 
 To condition model on some information I decided to use classifier-free guidance. I used [OpenAI's CLIP](https://openai.com/index/clip/) model to divide images into classes. At first I tried to extract 7 classes (a coast, a desert, a forest, a sky, a mountain, a body of water, a grassland) but there was a great disproportion and the [model struggled](figures/stage2-7classes.png) to generate under-represent classes such as a coast or a forest. In my second attempt I divided places into 3 classes, with more or less equal cardinality, by asking the model to choose whether an image represents a hot place, a cold place or a mild place. 
 
-The results of trained Unet model are presented on figure 4. The model was small so the quality is OK but not great. Unfortunately I was not able to compute the FID score as generating a grid of 27 images takes ~12 minutes on my GPU (and I was too lazy to do it using Google Colab). But I created additional samples to inspect, they can be found in the [figures](figures/) folder.
+The results of trained Unet model are presented on figure 4. The model was tiny and trained on a single GPU so the quality is OK but not great. Unfortunately I was not able to compute the FID score as generating a grid of 27 images takes ~12 minutes on my GPU (and I was too lazy to optimize it). But I created additional samples to inspect, they can be found in the [figures](figures/) folder.
 <br><br>
 
 ![KL-Samples](figures/stage2-3classes.png)<br>
